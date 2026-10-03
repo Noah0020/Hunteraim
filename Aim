@@ -1,0 +1,1424 @@
+--[[
+    HunterAim v8 (Crimson UI)
+    - 3-layer match detection
+    - Learning ability anim IDs per character + skin
+    - Name-keyword filter (blacklist + whitelist)
+    - Learned Anim Viewer with per-ID delete + per-character wipe
+    - Crimson tabbed UI (Aim / Learn / Info)
+    - Closes back into floating button
+]]
+
+if not game:IsLoaded() then
+    repeat task.wait(0.5) until game:IsLoaded()
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Camera = Workspace.CurrentCamera
+
+if _G._HunterAimLoaded then return end
+_G._HunterAimLoaded = true
+
+-- ============================================================
+-- LOAD WARNING
+-- ============================================================
+do
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "HunterAimWarning"
+    sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
+    sg.DisplayOrder = 999
+    pcall(function() sg.Parent = (gethui and gethui()) or CoreGui end)
+    if not sg.Parent then sg.Parent = PlayerGui end
+
+    local dim = Instance.new("TextButton")
+    dim.Size = UDim2.new(1, 0, 1, 0)
+    dim.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    dim.BackgroundTransparency = 0.5
+    dim.BorderSizePixel = 0
+    dim.Text = ""
+    dim.AutoButtonColor = false
+    dim.Parent = sg
+
+    local box = Instance.new("Frame")
+    box.Size = UDim2.fromOffset(460, 320)
+    box.Position = UDim2.fromScale(0.5, 0.5)
+    box.AnchorPoint = Vector2.new(0.5, 0.5)
+    box.BackgroundColor3 = Color3.fromRGB(24, 18, 20)
+    box.BorderSizePixel = 0
+    box.Parent = dim
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 14)
+    local bs = Instance.new("UIStroke", box)
+    bs.Color = Color3.fromRGB(220, 30, 60); bs.Thickness = 2
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -24, 0, 40)
+    title.Position = UDim2.fromOffset(12, 12)
+    title.BackgroundTransparency = 1
+    title.Text = "⚠  HunterAim — Read First"
+    title.TextColor3 = Color3.fromRGB(220, 30, 60)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 20
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = box
+
+    local body = Instance.new("TextLabel")
+    body.Size = UDim2.new(1, -24, 1, -120)
+    body.Position = UDim2.fromOffset(12, 56)
+    body.BackgroundTransparency = 1
+    body.Text = "HunterAim uses LEARNING CODE to auto-aim with skins and unknown abilities.\n\nYou have to at least slash and aim ONE TIME for it to work. Every new skin you use, the script learns its attack animation so aim activates automatically next time.\n\nIf learning fails, we will notify you and use always-on aim instead."
+    body.TextColor3 = Color3.fromRGB(230, 225, 228)
+    body.Font = Enum.Font.Gotham
+    body.TextSize = 13
+    body.TextWrapped = true
+    body.TextYAlignment = Enum.TextYAlignment.Top
+    body.TextXAlignment = Enum.TextXAlignment.Left
+    body.Parent = box
+
+    local ok = Instance.new("TextButton")
+    ok.Size = UDim2.new(1, -24, 0, 44)
+    ok.Position = UDim2.new(0, 12, 1, -56)
+    ok.BackgroundColor3 = Color3.fromRGB(220, 30, 60)
+    ok.Text = "Got it — continue"
+    ok.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ok.Font = Enum.Font.GothamBold
+    ok.TextSize = 15
+    ok.Parent = box
+    Instance.new("UICorner", ok).CornerRadius = UDim.new(0, 8)
+
+    ok.MouseButton1Click:Connect(function() sg:Destroy() end)
+end
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local S = {
+    NormalAim = false,
+    AimMode = "Camera",
+    Prediction = 0.15,
+    Smooth = 0.35,
+
+    SilentAim = false,
+
+    Learning = false,
+    ForceLearn = false,
+    Learned = {},
+
+    MatchActive = false,
+    PlayingSurvivor = false,
+}
+
+local FILE_NAME = "hunteraim_v6.json"
+local canSave = (type(writefile) == "function" and type(readfile) == "function")
+
+local function loadStore()
+    if not canSave then return end
+    pcall(function()
+        if isfile and isfile(FILE_NAME) then
+            local data = readfile(FILE_NAME)
+            if data and #data > 0 then
+                local decoded = HttpService:JSONDecode(data)
+                if type(decoded) == "table" then
+                    S.Learned = decoded
+                end
+            end
+        end
+    end)
+end
+
+local function saveStore()
+    if not canSave then return end
+    pcall(function()
+        writefile(FILE_NAME, HttpService:JSONEncode(S.Learned))
+    end)
+end
+
+local function deleteLearned(charKey, animId)
+    if not S.Learned[charKey] then return end
+    S.Learned[charKey][animId] = nil
+    if next(S.Learned[charKey]) == nil then
+        S.Learned[charKey] = nil
+    end
+    saveStore()
+end
+
+local function clearCharacter(charKey)
+    if not S.Learned[charKey] then return end
+    S.Learned[charKey] = nil
+    saveStore()
+end
+
+loadStore()
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function getRoot(m)
+    return m and (m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart)
+end
+
+local function getMyCharacter()
+    local c = LocalPlayer.Character
+    if not c then return nil, nil end
+    return c:GetAttribute("CharacterName") or c.Name,
+           c:GetAttribute("SkinName") or "Default"
+end
+
+local function getMyRole()
+    local c = LocalPlayer.Character
+    local p = c and c.Parent
+    if p and (p.Name == "Survivors" or p.Name == "Killers") then return p.Name end
+    return nil
+end
+
+local function getTargetFolder()
+    local players = Workspace:FindFirstChild("Players")
+    if not players then return nil end
+    local role = getMyRole()
+    if role == "Survivors" then return players:FindFirstChild("Killers") end
+    if role == "Killers" then return players:FindFirstChild("Survivors") end
+    return nil
+end
+
+local function getCharKey()
+    local name, skin = getMyCharacter()
+    if not name then return nil end
+    return name .. ":" .. (skin or "Default")
+end
+
+local function notify(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = title or "HunterAim",
+            Text = text or "",
+            Duration = duration or 4,
+        })
+    end)
+end
+
+-- ============================================================
+-- CHECK A — match scan
+-- ============================================================
+local function runMatchScan()
+    local myRoot = getRoot(LocalPlayer.Character)
+    local scanCenter = myRoot and myRoot.Position or Vector3.new(0, 50, 0)
+    local size = Vector3.new(1000, 2000, 1000)
+    local cf = CFrame.new(scanCenter)
+
+    local parts
+    local ok = pcall(function()
+        parts = Workspace:GetPartBoundsInBox(cf, size)
+    end)
+    if not ok or not parts then return false end
+
+    for _, part in ipairs(parts) do
+        local model = part:FindFirstAncestorOfClass("Model")
+        if model and model.Parent and model.Parent.Name == "Killers" then
+            return true
+        end
+    end
+    return false
+end
+
+-- ============================================================
+-- CHECK B — survivor anim watch
+-- ============================================================
+local lastSurvivorAnimTime = 0
+
+local function attachAnimWatcher(char)
+    task.wait(0.5)
+    local hum = char:WaitForChild("Humanoid", 5)
+    local anim = hum and hum:WaitForChild("Animator", 5)
+    if not anim then return end
+    anim.AnimationPlayed:Connect(function(track)
+        local p = track.Priority
+        if p == Enum.AnimationPriority.Movement
+           or p == Enum.AnimationPriority.Idle
+           or p == Enum.AnimationPriority.Core then
+            lastSurvivorAnimTime = os.clock()
+        end
+    end)
+end
+
+if LocalPlayer.Character then task.spawn(attachAnimWatcher, LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(function(c) task.spawn(attachAnimWatcher, c) end)
+
+local function isPlayingSurvivor()
+    local role = getMyRole()
+    if role ~= "Survivors" then return false end
+    return (os.clock() - lastSurvivorAnimTime) < 3
+end
+
+-- ============================================================
+-- DETECTION LOOP
+-- ============================================================
+task.spawn(function()
+    while true do
+        task.wait(5)
+        pcall(function()
+            S.MatchActive = runMatchScan()
+            S.PlayingSurvivor = isPlayingSurvivor()
+        end)
+    end
+end)
+
+task.delay(3, function()
+    pcall(function()
+        S.MatchActive = runMatchScan()
+        S.PlayingSurvivor = isPlayingSurvivor()
+    end)
+end)
+
+-- ============================================================
+-- CACHED TARGET
+-- ============================================================
+local cachedTargetHRP = nil
+
+local function updateCachedTarget()
+    local myRoot = getRoot(LocalPlayer.Character)
+    if not myRoot then cachedTargetHRP = nil return end
+    local folder = getTargetFolder()
+    if not folder then cachedTargetHRP = nil return end
+    local bestHRP, bestD = nil, 500
+    for _, s in ipairs(folder:GetChildren()) do
+        if s:IsA("Model") and s ~= LocalPlayer.Character then
+            local hrp = s:FindFirstChild("HumanoidRootPart")
+            local hum = s:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                local d = (hrp.Position - myRoot.Position).Magnitude
+                if d < bestD then bestD = d; bestHRP = hrp end
+            end
+        end
+    end
+    cachedTargetHRP = bestHRP
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        pcall(updateCachedTarget)
+    end
+end)
+
+-- ============================================================
+-- LEARNING
+-- ============================================================
+local IGNORE_IDS = {}
+
+-- Hard blacklist: any anim whose NAME contains one of these is never learned
+local IGNORE_NAME_KEYWORDS = {
+    -- cosmetics / emotes
+    "chicken", "emote", "taunt", "dance", "wave", "sit", "pose",
+    "victory", "defeat", "intro", "outro", "laugh", "cry", "cheer",
+    "clap", "point", "salute", "flip", "spin", "idle",
+    -- items / utility
+    "coin", "heal", "eat", "drink", "use", "consume", "bandage",
+    "medkit", "potion", "item", "pickup", "drop", "throw", "carry",
+    "open", "close", "interact", "revive", "rescue", "unlock",
+    -- movement
+    "walk", "run", "sprint", "jump", "fall", "land", "crouch",
+    "slide", "vault", "climb", "swim", "dodge",
+    -- misc
+    "spawn", "death", "hurt",
+}
+
+-- Whitelist keywords: if the anim name contains one of these AND no blacklist match,
+-- we're much more confident it's an actual attack.
+local ATTACK_NAME_KEYWORDS = {
+    "attack", "slash", "swing", "strike", "punch", "kick",
+    "stab", "shoot", "fire", "cast", "ability", "skill",
+    "sword", "blade", "weapon", "melee", "lunge", "combo",
+    "special", "power", "smash", "swipe", "chop", "hit",
+    "stun", "bash", "smack", "whack",
+}
+
+local abilityActive = false
+local abilityId = nil
+local abilityStartedAt = 0
+local firstLearnNotified = false
+
+local function isAbilityCandidate(track)
+    if not track or not track.Animation then return false end
+
+    local id = tostring(track.Animation.AnimationId):match("%d+")
+    if not id then return false end
+    if IGNORE_IDS[id] then return false end
+
+    -- length filter
+    if track.Length < 0.15 or track.Length > 3.5 then return false end
+
+    -- priority filter
+    local p = track.Priority
+    if p == Enum.AnimationPriority.Idle
+       or p == Enum.AnimationPriority.Movement
+       or p == Enum.AnimationPriority.Core then
+        return false
+    end
+
+    -- name filters
+    local animName = track.Animation.Name
+    local lower = animName and string.lower(animName) or ""
+
+    if #lower > 0 then
+        -- hard blacklist
+        for _, kw in ipairs(IGNORE_NAME_KEYWORDS) do
+            if string.find(lower, kw, 1, true) then
+                return false
+            end
+        end
+        -- attack whitelist (immediate accept)
+        for _, kw in ipairs(ATTACK_NAME_KEYWORDS) do
+            if string.find(lower, kw, 1, true) then
+                return true, id
+            end
+        end
+    end
+
+    -- Behavioral fallback: require Action priority + non-looping
+    if p ~= Enum.AnimationPriority.Action
+       and p ~= Enum.AnimationPriority.Action2
+       and p ~= Enum.AnimationPriority.Action3
+       and p ~= Enum.AnimationPriority.Action4 then
+        return false
+    end
+
+    if track.Looped then return false end
+
+    -- Reject slow anims played from a standstill
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hum and hrp then
+        local moving = hum.MoveDirection.Magnitude > 0.1
+                        or hrp.AssemblyLinearVelocity.Magnitude > 2
+        if not moving and track.Length > 0.6 then
+            return false
+        end
+    end
+
+    return true, id
+end
+
+local function attachLearner(char)
+    task.wait(0.5)
+    local hum = char:WaitForChild("Humanoid", 5)
+    local anim = hum and hum:WaitForChild("Animator", 5)
+    if not anim then return end
+
+    anim.AnimationPlayed:Connect(function(track)
+        if not S.Learning then return end
+        if not S.MatchActive then return end
+        if not S.ForceLearn and not isPlayingSurvivor() then return end
+
+        local ok, id = isAbilityCandidate(track)
+        if not ok then return end
+
+        local charKey = getCharKey()
+        if not charKey then return end
+
+        task.wait()
+        if track.Length > 0 then
+            abilityActive = true
+            abilityId = id
+            abilityStartedAt = os.clock()
+
+            if not S.Learned[charKey] then S.Learned[charKey] = {} end
+            if not S.Learned[charKey][id] then
+                S.Learned[charKey][id] = true
+                saveStore()
+
+                if not firstLearnNotified then
+                    firstLearnNotified = true
+                    notify("✓ Aim Ready", "Learned " .. charKey .. " — aim now active", 5)
+                else
+                    notify("✓ Learned", charKey .. " | " .. (track.Animation.Name or id), 3)
+                end
+                print("[HunterAim] Learned: " .. charKey .. " → " .. id)
+            end
+
+            track.Stopped:Once(function()
+                if abilityId == id then
+                    abilityActive = false
+                    abilityId = nil
+                end
+            end)
+            task.delay(math.max(track.Length + 0.5, 2), function()
+                if abilityId == id and os.clock() - abilityStartedAt >= track.Length then
+                    abilityActive = false
+                    abilityId = nil
+                end
+            end)
+        end
+    end)
+end
+
+if LocalPlayer.Character then task.spawn(attachLearner, LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(function(c) task.spawn(attachLearner, c) end)
+
+local function hasLearnedAnims()
+    local charKey = getCharKey()
+    if not charKey then return false end
+    local tbl = S.Learned[charKey]
+    if not tbl then return false end
+    for _ in pairs(tbl) do return true end
+    return false
+end
+
+-- ============================================================
+-- AIM
+-- ============================================================
+local function predictHRP(hrp, seconds)
+    if not hrp then return nil end
+    local vel = hrp.AssemblyLinearVelocity or Vector3.new()
+    return hrp.Position + vel * seconds
+end
+
+local function applyAim(targetPos, mode, smooth)
+    if not targetPos then return end
+    smooth = smooth or S.Smooth
+    if mode == "Camera" or mode == "HRP+Camera" then
+        Camera.CFrame = Camera.CFrame:Lerp(
+            CFrame.lookAt(Camera.CFrame.Position, targetPos),
+            smooth
+        )
+    end
+    if mode == "HRP" or mode == "HRP+Camera" then
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if myRoot then
+            local flat = Vector3.new(targetPos.X, myRoot.Position.Y, targetPos.Z)
+            if (flat - myRoot.Position).Magnitude > 0.1 then
+                myRoot.CFrame = myRoot.CFrame:Lerp(
+                    CFrame.lookAt(myRoot.Position, flat),
+                    smooth
+                )
+            end
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    if not S.NormalAim then return end
+    if not S.MatchActive then return end
+    if not S.ForceLearn and not isPlayingSurvivor() then return end
+    if not hasLearnedAnims() then return end
+    if not abilityActive then return end
+    if not cachedTargetHRP or not cachedTargetHRP.Parent then return end
+    local targetPos = predictHRP(cachedTargetHRP, S.Prediction)
+    applyAim(targetPos, S.AimMode)
+end)
+
+-- ============================================================
+-- CRIMSON UI
+-- ============================================================
+local ACCENT     = Color3.fromRGB(220, 30, 60)
+local ACCENT_DIM = Color3.fromRGB(120, 20, 35)
+local BG_DARK    = Color3.fromRGB(16, 14, 16)
+local BG_MID     = Color3.fromRGB(24, 20, 22)
+local BG_ROW     = Color3.fromRGB(34, 28, 30)
+local TEXT_MAIN  = Color3.fromRGB(240, 235, 238)
+local TEXT_DIM   = Color3.fromRGB(150, 140, 145)
+local STROKE     = Color3.fromRGB(48, 38, 42)
+
+if _G._HunterAimGui and _G._HunterAimGui.Parent then
+    pcall(function() _G._HunterAimGui:Destroy() end)
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "HunterAimPanel"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
+pcall(function() gui.Parent = (gethui and gethui()) or CoreGui end)
+if not gui.Parent then gui.Parent = PlayerGui end
+_G._HunterAimGui = gui
+
+-- Floating button
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.fromOffset(46, 46)
+toggleBtn.Position = UDim2.new(0, 40, 0.5, -23)
+toggleBtn.BackgroundColor3 = BG_MID
+toggleBtn.Text = "HA"
+toggleBtn.TextColor3 = ACCENT
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 14
+toggleBtn.AutoButtonColor = false
+toggleBtn.Active = true
+toggleBtn.Draggable = true
+toggleBtn.Parent = gui
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(1, 0)
+local tbs = Instance.new("UIStroke", toggleBtn)
+tbs.Color = ACCENT; tbs.Thickness = 1.5
+
+-- Window
+local window = Instance.new("Frame")
+window.Size = UDim2.fromOffset(500, 400)
+window.Position = UDim2.fromScale(0.5, 0.5)
+window.AnchorPoint = Vector2.new(0.5, 0.5)
+window.BackgroundColor3 = BG_DARK
+window.BorderSizePixel = 0
+window.Visible = false
+window.ClipsDescendants = true
+window.Parent = gui
+Instance.new("UICorner", window).CornerRadius = UDim.new(0, 12)
+local ws = Instance.new("UIStroke", window)
+ws.Color = STROKE; ws.Thickness = 1
+
+-- Header
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 40)
+header.BackgroundColor3 = BG_MID
+header.BorderSizePixel = 0
+header.Parent = window
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
+local headerFix = Instance.new("Frame")
+headerFix.Size = UDim2.new(1, 0, 0, 12)
+headerFix.Position = UDim2.new(0, 0, 1, -12)
+headerFix.BackgroundColor3 = BG_MID
+headerFix.BorderSizePixel = 0
+headerFix.Parent = header
+
+local dot = Instance.new("Frame")
+dot.Size = UDim2.fromOffset(10, 10)
+dot.Position = UDim2.new(0, 14, 0.5, -5)
+dot.BackgroundColor3 = ACCENT
+dot.BorderSizePixel = 0
+dot.Parent = header
+Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Size = UDim2.new(0, 200, 1, 0)
+titleLbl.Position = UDim2.fromOffset(34, 0)
+titleLbl.BackgroundTransparency = 1
+titleLbl.Text = "HunterAim"
+titleLbl.TextColor3 = TEXT_MAIN
+titleLbl.Font = Enum.Font.GothamBold
+titleLbl.TextSize = 14
+titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.Parent = header
+
+local verLbl = Instance.new("TextLabel")
+verLbl.Size = UDim2.new(0, 60, 1, 0)
+verLbl.Position = UDim2.new(0, 110, 0, 0)
+verLbl.BackgroundTransparency = 1
+verLbl.Text = "v8"
+verLbl.TextColor3 = TEXT_DIM
+verLbl.Font = Enum.Font.GothamMedium
+verLbl.TextSize = 11
+verLbl.TextXAlignment = Enum.TextXAlignment.Left
+verLbl.Parent = header
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(24, 24)
+closeBtn.Position = UDim2.new(1, -34, 0.5, -12)
+closeBtn.BackgroundColor3 = BG_DARK
+closeBtn.Text = "×"
+closeBtn.TextColor3 = ACCENT
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 16
+closeBtn.AutoButtonColor = false
+closeBtn.Parent = header
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+closeBtn.MouseEnter:Connect(function() closeBtn.BackgroundColor3 = ACCENT end)
+closeBtn.MouseLeave:Connect(function() closeBtn.BackgroundColor3 = BG_DARK end)
+
+-- Sidebar
+local sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 110, 1, -40)
+sidebar.Position = UDim2.new(0, 0, 0, 40)
+sidebar.BackgroundColor3 = BG_MID
+sidebar.BorderSizePixel = 0
+sidebar.Parent = window
+
+local sideFix = Instance.new("Frame")
+sideFix.Size = UDim2.new(0, 12, 1, -40)
+sideFix.Position = UDim2.new(1, -12, 0, 0)
+sideFix.BackgroundColor3 = BG_MID
+sideFix.BorderSizePixel = 0
+sideFix.Parent = sidebar
+
+local tabList = Instance.new("Frame")
+tabList.Size = UDim2.new(1, 0, 1, -20)
+tabList.Position = UDim2.new(0, 0, 0, 10)
+tabList.BackgroundTransparency = 1
+tabList.Parent = sidebar
+
+local tabLayout = Instance.new("UIListLayout", tabList)
+tabLayout.Padding = UDim.new(0, 6)
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+-- Content
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -110, 1, -40)
+content.Position = UDim2.new(0, 110, 0, 40)
+content.BackgroundTransparency = 1
+content.Parent = window
+
+local pages = {}
+local tabButtons = {}
+
+local function makePage(name)
+    local page = Instance.new("ScrollingFrame")
+    page.Size = UDim2.new(1, -20, 1, -20)
+    page.Position = UDim2.new(0, 10, 0, 10)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 3
+    page.ScrollBarImageColor3 = ACCENT
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible = false
+    page.Parent = content
+
+    local lay = Instance.new("UIListLayout", page)
+    lay.Padding = UDim.new(0, 6)
+    lay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    pages[name] = page
+    return page
+end
+
+local function makeTab(name)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -20, 0, 32)
+    b.BackgroundColor3 = BG_DARK
+    b.Text = name
+    b.TextColor3 = TEXT_DIM
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 12
+    b.AutoButtonColor = false
+    b.Parent = tabList
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+    tabButtons[name] = b
+
+    b.MouseButton1Click:Connect(function()
+        for _, p in pairs(pages) do p.Visible = false end
+        for _, tb in pairs(tabButtons) do
+            tb.TextColor3 = TEXT_DIM
+            tb.BackgroundColor3 = BG_DARK
+        end
+        if pages[name] then pages[name].Visible = true end
+        b.TextColor3 = ACCENT
+        b.BackgroundColor3 = BG_ROW
+    end)
+    return b
+end
+
+local function sectionLabel(page, text)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, 0, 0, 20)
+    l.BackgroundTransparency = 1
+    l.Text = string.upper(text)
+    l.TextColor3 = TEXT_DIM
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 10
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = page
+    return l
+end
+
+local function toggleRow(page, name, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = BG_ROW
+    row.BorderSizePixel = 0
+    row.Parent = page
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -70, 1, 0)
+    l.Position = UDim2.fromOffset(12, 0)
+    l.BackgroundTransparency = 1
+    l.Text = name
+    l.TextColor3 = TEXT_MAIN
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = row
+
+    local state = initial
+
+    local switch = Instance.new("TextButton")
+    switch.Size = UDim2.fromOffset(38, 20)
+    switch.Position = UDim2.new(1, -50, 0.5, -10)
+    switch.BackgroundColor3 = state and ACCENT or Color3.fromRGB(55, 45, 48)
+    switch.Text = ""
+    switch.AutoButtonColor = false
+    switch.Parent = row
+    Instance.new("UICorner", switch).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(14, 14)
+    knob.Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switch
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local api = {}
+    api.set = function(v)
+        state = v
+        switch.BackgroundColor3 = v and ACCENT or Color3.fromRGB(55, 45, 48)
+        knob.Position = v and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+    end
+
+    switch.MouseButton1Click:Connect(function()
+        state = not state
+        api.set(state)
+        if callback then callback(state) end
+    end)
+
+    return api
+end
+
+local function sliderRow(page, name, minV, maxV, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 46)
+    row.BackgroundColor3 = BG_ROW
+    row.BorderSizePixel = 0
+    row.Parent = page
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -70, 0, 18)
+    l.Position = UDim2.fromOffset(12, 4)
+    l.BackgroundTransparency = 1
+    l.Text = name
+    l.TextColor3 = TEXT_MAIN
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = row
+
+    local vl = Instance.new("TextLabel")
+    vl.Size = UDim2.new(0, 60, 0, 18)
+    vl.Position = UDim2.new(1, -72, 0, 4)
+    vl.BackgroundTransparency = 1
+    vl.Text = tostring(math.floor(initial * 100) / 100)
+    vl.TextColor3 = ACCENT
+    vl.Font = Enum.Font.GothamBold
+    vl.TextSize = 12
+    vl.TextXAlignment = Enum.TextXAlignment.Right
+    vl.Parent = row
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(1, -24, 0, 6)
+    bg.Position = UDim2.new(0, 12, 0, 32)
+    bg.BackgroundColor3 = Color3.fromRGB(50, 42, 45)
+    bg.BorderSizePixel = 0
+    bg.Parent = row
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = ACCENT
+    fill.BorderSizePixel = 0
+    fill.Parent = bg
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local function setV(v)
+        local pct = (v - minV) / (maxV - minV)
+        fill.Size = UDim2.new(pct, 0, 1, 0)
+        vl.Text = tostring(math.floor(v * 100) / 100)
+    end
+    setV(initial)
+
+    local dragging = false
+    local function apply(x)
+        local abs = bg.AbsolutePosition.X
+        local w = bg.AbsoluteSize.X
+        local pct = math.clamp((x - abs) / w, 0, 1)
+        local v = minV + pct * (maxV - minV)
+        setV(v)
+        if callback then callback(v) end
+    end
+
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            apply(input.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch then
+            apply(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+local function dropdownRow(page, name, options, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = BG_ROW
+    row.BorderSizePixel = 0
+    row.Parent = page
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -130, 1, 0)
+    l.Position = UDim2.fromOffset(12, 0)
+    l.BackgroundTransparency = 1
+    l.Text = name
+    l.TextColor3 = TEXT_MAIN
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(100, 24)
+    btn.Position = UDim2.new(1, -112, 0.5, -12)
+    btn.BackgroundColor3 = BG_DARK
+    btn.Text = initial
+    btn.TextColor3 = ACCENT
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.AutoButtonColor = false
+    btn.Parent = row
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+
+    local idx = 1
+    for i, opt in ipairs(options) do
+        if opt == initial then idx = i break end
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        idx = idx + 1
+        if idx > #options then idx = 1 end
+        btn.Text = options[idx]
+        if callback then callback(options[idx]) end
+    end)
+end
+
+local function buttonRow(page, name, callback, color)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 0, 34)
+    b.BackgroundColor3 = color or BG_ROW
+    b.Text = name
+    b.TextColor3 = color and Color3.new(1, 1, 1) or TEXT_MAIN
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 12
+    b.AutoButtonColor = false
+    b.Parent = page
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+    b.MouseEnter:Connect(function()
+        b.BackgroundColor3 = (color or BG_ROW):Lerp(Color3.new(1,1,1), 0.12)
+    end)
+    b.MouseLeave:Connect(function()
+        b.BackgroundColor3 = color or BG_ROW
+    end)
+    b.MouseButton1Click:Connect(function()
+        if callback then callback() end
+    end)
+    return b
+end
+
+-- Force Learn warning
+local function showForceLearnWarning(onConfirm)
+    local dim = Instance.new("TextButton")
+    dim.Size = UDim2.new(1, 0, 1, 0)
+    dim.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    dim.BackgroundTransparency = 0.5
+    dim.BorderSizePixel = 0
+    dim.Text = ""
+    dim.AutoButtonColor = false
+    dim.ZIndex = 200
+    dim.Parent = gui
+
+    local box = Instance.new("Frame")
+    box.Size = UDim2.fromOffset(420, 220)
+    box.Position = UDim2.fromScale(0.5, 0.5)
+    box.AnchorPoint = Vector2.new(0.5, 0.5)
+    box.BackgroundColor3 = Color3.fromRGB(40, 20, 24)
+    box.BorderSizePixel = 0
+    box.ZIndex = 201
+    box.Parent = dim
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 12)
+    local bs = Instance.new("UIStroke", box)
+    bs.Color = Color3.fromRGB(255, 100, 100); bs.Thickness = 2
+
+    local t = Instance.new("TextLabel")
+    t.Size = UDim2.new(1, -24, 0, 36)
+    t.Position = UDim2.fromOffset(12, 12)
+    t.BackgroundTransparency = 1
+    t.Text = "⚠  Force Learn Warning"
+    t.TextColor3 = Color3.fromRGB(255, 130, 130)
+    t.Font = Enum.Font.GothamBold
+    t.TextSize = 18
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.ZIndex = 202
+    t.Parent = box
+
+    local b = Instance.new("TextLabel")
+    b.Size = UDim2.new(1, -24, 1, -140)
+    b.Position = UDim2.fromOffset(12, 50)
+    b.BackgroundTransparency = 1
+    b.Text = "Force Learn bypasses the survivor check.\n\nThis will learn animations even when you are NOT playing as a survivor. It may pick up wrong animations and mess up aim activation.\n\nUse only if the normal learning does not work."
+    b.TextColor3 = Color3.fromRGB(240, 220, 220)
+    b.Font = Enum.Font.Gotham
+    b.TextSize = 13
+    b.TextWrapped = true
+    b.TextYAlignment = Enum.TextYAlignment.Top
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.ZIndex = 202
+    b.Parent = box
+
+    local cancel = Instance.new("TextButton")
+    cancel.Size = UDim2.new(0.5, -18, 0, 40)
+    cancel.Position = UDim2.new(0, 12, 1, -52)
+    cancel.BackgroundColor3 = Color3.fromRGB(60, 50, 55)
+    cancel.Text = "Cancel"
+    cancel.TextColor3 = Color3.new(1, 1, 1)
+    cancel.Font = Enum.Font.GothamBold
+    cancel.TextSize = 14
+    cancel.ZIndex = 202
+    cancel.Parent = box
+    Instance.new("UICorner", cancel).CornerRadius = UDim.new(0, 8)
+
+    local confirm = Instance.new("TextButton")
+    confirm.Size = UDim2.new(0.5, -18, 0, 40)
+    confirm.Position = UDim2.new(0.5, 6, 1, -52)
+    confirm.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+    confirm.Text = "I understand"
+    confirm.TextColor3 = Color3.fromRGB(40, 15, 20)
+    confirm.Font = Enum.Font.GothamBold
+    confirm.TextSize = 14
+    confirm.ZIndex = 202
+    confirm.Parent = box
+    Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 8)
+
+    cancel.MouseButton1Click:Connect(function() dim:Destroy() end)
+    confirm.MouseButton1Click:Connect(function()
+        dim:Destroy()
+        if onConfirm then onConfirm() end
+    end)
+end
+
+-- ============================================================
+-- BUILD TABS
+-- ============================================================
+makeTab("Aim")
+makeTab("Learn")
+makeTab("Info")
+
+local aimPage = makePage("Aim")
+local learnPage = makePage("Learn")
+local infoPage = makePage("Info")
+
+-- AIM page
+sectionLabel(aimPage, "Aim")
+toggleRow(aimPage, "Normal Aim", S.NormalAim, function(v) S.NormalAim = v end)
+dropdownRow(aimPage, "Aim Mode", {"Camera", "HRP", "HRP+Camera"}, S.AimMode, function(v) S.AimMode = v end)
+sectionLabel(aimPage, "Tuning")
+sliderRow(aimPage, "Prediction", 0, 0.5, S.Prediction, function(v) S.Prediction = v end)
+sliderRow(aimPage, "Smooth", 0.05, 1, S.Smooth, function(v) S.Smooth = v end)
+
+-- LEARN page
+sectionLabel(learnPage, "Learning")
+toggleRow(learnPage, "Learning Enabled", S.Learning, function(v)
+    S.Learning = v
+    if v then notify("HunterAim", "Learning ON", 3) end
+end)
+
+local forceLearnApi
+forceLearnApi = toggleRow(learnPage, "Force Learn (bypass check)", S.ForceLearn, function(v)
+    if v then
+        forceLearnApi.set(false)
+        showForceLearnWarning(function()
+            S.ForceLearn = true
+            forceLearnApi.set(true)
+            notify("HunterAim", "Force Learn ENABLED", 3)
+        end)
+    else
+        S.ForceLearn = false
+    end
+end)
+
+sectionLabel(learnPage, "Data")
+buttonRow(learnPage, "Reset Learned Data", function()
+    S.Learned = {}
+    saveStore()
+    notify("HunterAim", "Learned data cleared", 3)
+end, Color3.fromRGB(150, 40, 55))
+
+-- INFO page
+sectionLabel(infoPage, "Silent Aim (WIP)")
+toggleRow(infoPage, "Silent Aim", false, function(v)
+    S.SilentAim = v
+    if v then notify("HunterAim", "Silent aim WIP", 3) end
+end)
+
+sectionLabel(infoPage, "Status")
+local statusMatch = Instance.new("TextLabel")
+statusMatch.Size = UDim2.new(1, 0, 0, 20)
+statusMatch.BackgroundTransparency = 1
+statusMatch.Text = "Match active: ?"
+statusMatch.TextColor3 = TEXT_DIM
+statusMatch.Font = Enum.Font.GothamMedium
+statusMatch.TextSize = 11
+statusMatch.TextXAlignment = Enum.TextXAlignment.Left
+statusMatch.Parent = infoPage
+
+local statusRole = statusMatch:Clone()
+statusRole.Text = "Role: ?"
+statusRole.Parent = infoPage
+
+local statusAim = statusMatch:Clone()
+statusAim.Text = "Aim: idle"
+statusAim.Parent = infoPage
+
+local statusLearn = statusMatch:Clone()
+statusLearn.Text = "Learned anims: 0"
+statusLearn.Parent = infoPage
+
+-- ============================================================
+-- LEARNED ANIM VIEWER
+-- ============================================================
+sectionLabel(infoPage, "Learned Anim Viewer")
+
+local viewerState = {
+    selectedChar = nil,
+}
+
+local viewerRow = Instance.new("Frame")
+viewerRow.Size = UDim2.new(1, 0, 0, 38)
+viewerRow.BackgroundColor3 = BG_ROW
+viewerRow.BorderSizePixel = 0
+viewerRow.Parent = infoPage
+Instance.new("UICorner", viewerRow).CornerRadius = UDim.new(0, 6)
+
+local viewerLbl = Instance.new("TextLabel")
+viewerLbl.Size = UDim2.new(1, -140, 1, 0)
+viewerLbl.Position = UDim2.fromOffset(12, 0)
+viewerLbl.BackgroundTransparency = 1
+viewerLbl.Text = "Character"
+viewerLbl.TextColor3 = TEXT_MAIN
+viewerLbl.Font = Enum.Font.GothamMedium
+viewerLbl.TextSize = 12
+viewerLbl.TextXAlignment = Enum.TextXAlignment.Left
+viewerLbl.Parent = viewerRow
+
+local viewerBtn = Instance.new("TextButton")
+viewerBtn.Size = UDim2.fromOffset(120, 24)
+viewerBtn.Position = UDim2.new(1, -132, 0.5, -12)
+viewerBtn.BackgroundColor3 = BG_DARK
+viewerBtn.Text = "All"
+viewerBtn.TextColor3 = ACCENT
+viewerBtn.Font = Enum.Font.GothamBold
+viewerBtn.TextSize = 11
+viewerBtn.AutoButtonColor = false
+viewerBtn.Parent = viewerRow
+Instance.new("UICorner", viewerBtn).CornerRadius = UDim.new(0, 5)
+
+local viewerList = Instance.new("Frame")
+viewerList.Size = UDim2.new(1, 0, 0, 0)
+viewerList.AutomaticSize = Enum.AutomaticSize.Y
+viewerList.BackgroundTransparency = 1
+viewerList.Parent = infoPage
+
+local viewerLayout = Instance.new("UIListLayout", viewerList)
+viewerLayout.Padding = UDim.new(0, 4)
+viewerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local refreshBtn = Instance.new("TextButton")
+refreshBtn.Size = UDim2.new(1, 0, 0, 30)
+refreshBtn.BackgroundColor3 = ACCENT_DIM
+refreshBtn.Text = "↻  Refresh List"
+refreshBtn.TextColor3 = Color3.new(1, 1, 1)
+refreshBtn.Font = Enum.Font.GothamBold
+refreshBtn.TextSize = 12
+refreshBtn.AutoButtonColor = false
+refreshBtn.Parent = infoPage
+Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+
+local rebuildViewer
+
+local function makeCharHeader(charKey, count)
+    local charHdr = Instance.new("Frame")
+    charHdr.Size = UDim2.new(1, 0, 0, 26)
+    charHdr.BackgroundColor3 = BG_MID
+    charHdr.BorderSizePixel = 0
+    charHdr.Parent = viewerList
+    Instance.new("UICorner", charHdr).CornerRadius = UDim.new(0, 5)
+
+    local chLbl = Instance.new("TextLabel")
+    chLbl.Size = UDim2.new(1, -80, 1, 0)
+    chLbl.Position = UDim2.fromOffset(10, 0)
+    chLbl.BackgroundTransparency = 1
+    chLbl.Text = charKey .. "  (" .. count .. ")"
+    chLbl.TextColor3 = ACCENT
+    chLbl.Font = Enum.Font.GothamBold
+    chLbl.TextSize = 11
+    chLbl.TextXAlignment = Enum.TextXAlignment.Left
+    chLbl.Parent = charHdr
+
+    local wipe = Instance.new("TextButton")
+    wipe.Size = UDim2.fromOffset(60, 18)
+    wipe.Position = UDim2.new(1, -66, 0.5, -9)
+    wipe.BackgroundColor3 = ACCENT_DIM
+    wipe.Text = "wipe"
+    wipe.TextColor3 = Color3.new(1, 1, 1)
+    wipe.Font = Enum.Font.GothamBold
+    wipe.TextSize = 10
+    wipe.AutoButtonColor = false
+    wipe.Parent = charHdr
+    Instance.new("UICorner", wipe).CornerRadius = UDim.new(0, 4)
+
+    wipe.MouseEnter:Connect(function() wipe.BackgroundColor3 = ACCENT end)
+    wipe.MouseLeave:Connect(function() wipe.BackgroundColor3 = ACCENT_DIM end)
+    wipe.MouseButton1Click:Connect(function()
+        clearCharacter(charKey)
+        notify("HunterAim", "Cleared " .. charKey, 2)
+        rebuildViewer()
+    end)
+end
+
+rebuildViewer = function()
+    for _, c in ipairs(viewerList:GetChildren()) do
+        if not c:IsA("UIListLayout") then
+            c:Destroy()
+        end
+    end
+
+    local charKeys = {}
+    for k, _ in pairs(S.Learned) do
+        table.insert(charKeys, k)
+    end
+    table.sort(charKeys)
+
+    if viewerState.selectedChar and not S.Learned[viewerState.selectedChar] then
+        viewerState.selectedChar = nil
+        viewerBtn.Text = "All"
+    end
+
+    local toShow = viewerState.selectedChar and {viewerState.selectedChar} or charKeys
+
+    if #toShow == 0 then
+        local empty = Instance.new("TextLabel")
+        empty.Size = UDim2.new(1, 0, 0, 24)
+        empty.BackgroundTransparency = 1
+        empty.Text = "No learned anims yet."
+        empty.TextColor3 = TEXT_DIM
+        empty.Font = Enum.Font.Gotham
+        empty.TextSize = 11
+        empty.TextXAlignment = Enum.TextXAlignment.Left
+        empty.Parent = viewerList
+        return
+    end
+
+    for _, charKey in ipairs(toShow) do
+        local anims = S.Learned[charKey] or {}
+        local animIds = {}
+        for id, _ in pairs(anims) do
+            table.insert(animIds, id)
+        end
+        table.sort(animIds)
+
+        makeCharHeader(charKey, #animIds)
+
+        for _, id in ipairs(animIds) do
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1, 0, 0, 26)
+            row.BackgroundColor3 = Color3.fromRGB(28, 22, 24)
+            row.BorderSizePixel = 0
+            row.Parent = viewerList
+            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+
+            local idLbl = Instance.new("TextLabel")
+            idLbl.Size = UDim2.new(1, -50, 1, 0)
+            idLbl.Position = UDim2.fromOffset(10, 0)
+            idLbl.BackgroundTransparency = 1
+            idLbl.Text = "ID: " .. tostring(id)
+            idLbl.TextColor3 = TEXT_MAIN
+            idLbl.Font = Enum.Font.Code
+            idLbl.TextSize = 11
+            idLbl.TextXAlignment = Enum.TextXAlignment.Left
+            idLbl.Parent = row
+
+            local del = Instance.new("TextButton")
+            del.Size = UDim2.fromOffset(22, 18)
+            del.Position = UDim2.new(1, -28, 0.5, -9)
+            del.BackgroundColor3 = ACCENT_DIM
+            del.Text = "×"
+            del.TextColor3 = Color3.new(1, 1, 1)
+            del.Font = Enum.Font.GothamBold
+            del.TextSize = 12
+            del.AutoButtonColor = false
+            del.Parent = row
+            Instance.new("UICorner", del).CornerRadius = UDim.new(0, 4)
+
+            del.MouseEnter:Connect(function() del.BackgroundColor3 = ACCENT end)
+            del.MouseLeave:Connect(function() del.BackgroundColor3 = ACCENT_DIM end)
+            del.MouseButton1Click:Connect(function()
+                deleteLearned(charKey, id)
+                rebuildViewer()
+                notify("HunterAim", "Removed " .. id, 2)
+            end)
+        end
+    end
+end
+
+viewerBtn.MouseButton1Click:Connect(function()
+    local keys = {"__ALL__"}
+    local list = {}
+    for k, _ in pairs(S.Learned) do
+        table.insert(list, k)
+    end
+    table.sort(list)
+    for _, k in ipairs(list) do
+        table.insert(keys, k)
+    end
+
+    local cur = viewerState.selectedChar or "__ALL__"
+    local idx = 1
+    for i, k in ipairs(keys) do
+        if k == cur then idx = i break end
+    end
+    idx = idx + 1
+    if idx > #keys then idx = 1 end
+
+    local nextKey = keys[idx]
+    if nextKey == "__ALL__" then
+        viewerState.selectedChar = nil
+        viewerBtn.Text = "All"
+    else
+        viewerState.selectedChar = nextKey
+        viewerBtn.Text = nextKey
+    end
+    rebuildViewer()
+end)
+
+refreshBtn.MouseButton1Click:Connect(function()
+    rebuildViewer()
+end)
+
+rebuildViewer()
+
+task.spawn(function()
+    while gui.Parent do
+        task.wait(3)
+        pcall(rebuildViewer)
+    end
+end)
+
+-- Status updater
+task.spawn(function()
+    while gui.Parent do
+        task.wait(0.5)
+        pcall(function()
+            statusMatch.Text = "Match active: " .. (S.MatchActive and "YES" or "no")
+            statusMatch.TextColor3 = S.MatchActive and Color3.fromRGB(110, 220, 110) or Color3.fromRGB(220, 100, 110)
+
+            local role = getMyRole()
+            statusRole.Text = "Role: " .. (role or "unknown") .. (S.PlayingSurvivor and " (survivor)" or "")
+
+            if S.NormalAim and abilityActive then
+                statusAim.Text = "Aim: ACTIVE"
+                statusAim.TextColor3 = Color3.fromRGB(110, 220, 110)
+            elseif S.NormalAim then
+                statusAim.Text = "Aim: armed, waiting"
+                statusAim.TextColor3 = Color3.fromRGB(230, 200, 120)
+            else
+                statusAim.Text = "Aim: off"
+                statusAim.TextColor3 = TEXT_DIM
+            end
+
+            local charKey = getCharKey()
+            local n = 0
+            if charKey and S.Learned[charKey] then
+                for _ in pairs(S.Learned[charKey]) do n = n + 1 end
+            end
+            statusLearn.Text = "Learned (" .. (charKey or "?") .. "): " .. n
+        end)
+    end
+end)
+
+-- Default tab
+for _, tb in pairs(tabButtons) do
+    tb.TextColor3 = TEXT_DIM
+    tb.BackgroundColor3 = BG_DARK
+end
+tabButtons["Aim"].TextColor3 = ACCENT
+tabButtons["Aim"].BackgroundColor3 = BG_ROW
+pages["Aim"].Visible = true
+
+-- ============================================================
+-- OPEN / CLOSE
+-- ============================================================
+local windowOpen = false
+local function setOpen(v)
+    windowOpen = v
+    window.Visible = v
+    toggleBtn.Visible = not v
+end
+
+toggleBtn.MouseButton1Click:Connect(function() setOpen(true) end)
+closeBtn.MouseButton1Click:Connect(function() setOpen(false) end)
+
+-- ============================================================
+-- DRAG
+-- ============================================================
+local dragging, dragStart, startPos = false, nil, nil
+
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = window.Position
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if not dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - dragStart
+        window.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+        dragStart = nil
+    end
+end)
+
+-- ============================================================
+-- CLEANUP HOOK
+-- ============================================================
+LocalPlayer.CharacterAdded:Connect(function()
+    cachedTargetHRP = nil
+    abilityActive = false
+    abilityId = nil
+    firstLearnNotified = false
+end)
+
+notify("HunterAim v8", "Loaded. Press HA button.", 5)
+print("[HunterAim] v8 loaded.")
