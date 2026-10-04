@@ -1,993 +1,915 @@
-repeat task.wait() until game:IsLoaded()
+--[[
+    HunterAim v10 (survivor, asset-driven, whitelisted, ability-aware prediction)
+    - Auto-detects the survivor you're playing
+    - Reads ability anim + sound ids from ReplicatedStorage.Assets
+    - Reads Config.Sounds, Config.Sound, Config.SFX, Config.Sfx,
+      Config.SoundEffects, Config.SoundIds (all variants merged)
+    - Aims ONLY on:
+        * Shedletsky  → Slash
+        * Chance      → Shoot (AimGun / GunFire / GunExplode / GunFail)
+        * Two Time    → Stab  (Stab / LungeStart / Lunge)
+    - Prediction:
+        * Ping prediction only applies to Chance (ranged)
+        * Shed slash + Two Time stab use velocity-only lead
+    - Targets the nearest killer
+]]
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
+if not game:IsLoaded() then
+    repeat task.wait(0.5) until game:IsLoaded()
+end
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-local CoreGui = game:GetService("CoreGui")
-local TeleportService = game:GetService("TeleportService")
-local Lighting = game:GetService("Lighting")
+local Workspace         = game:GetService("Workspace")
+local CoreGui           = game:GetService("CoreGui")
+local UserInputService  = game:GetService("UserInputService")
+local StarterGui        = game:GetService("StarterGui")
+local Stats             = game:GetService("Stats")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+local Camera      = Workspace.CurrentCamera
 
--- KEY
-local KEY = "release"
-do
-	local unlocked = false
-	local sg = Instance.new("ScreenGui")
-	sg.Name = "HuntsakenKey"
-	sg.ResetOnSpawn = false
-	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	pcall(function() sg.Parent = (gethui and gethui()) or CoreGui end)
-	if not sg.Parent then sg.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+if _G._HunterAimLoaded then return end
+_G._HunterAimLoaded = true
 
-	local frame = Instance.new("Frame")
-	frame.Size = UDim2.fromOffset(340, 200)
-	frame.Position = UDim2.fromScale(0.5, 0.5)
-	frame.AnchorPoint = Vector2.new(0.5, 0.5)
-	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
-	frame.BorderSizePixel = 0
-	frame.Parent = sg
-	Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if Workspace.CurrentCamera then Camera = Workspace.CurrentCamera end
+end)
 
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, 0, 0, 40)
-	title.BackgroundTransparency = 1
-	title.Text = "Huntsaken  |  Key"
-	title.TextColor3 = Color3.fromRGB(255, 60, 60)
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 20
-	title.Parent = frame
-
-	local note = Instance.new("TextLabel")
-	note.Size = UDim2.new(1, -24, 0, 50)
-	note.Position = UDim2.fromOffset(12, 40)
-	note.BackgroundTransparency = 1
-	note.Text = "Script owners are not responsible for bans.\nKEY = release"
-	note.TextColor3 = Color3.fromRGB(200, 200, 200)
-	note.Font = Enum.Font.Gotham
-	note.TextSize = 14
-	note.TextWrapped = true
-	note.Parent = frame
-
-	local box = Instance.new("TextBox")
-	box.Size = UDim2.new(1, -40, 0, 34)
-	box.Position = UDim2.fromOffset(20, 100)
-	box.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-	box.TextColor3 = Color3.new(1, 1, 1)
-	box.PlaceholderText = "Enter key..."
-	box.Font = Enum.Font.Gotham
-	box.TextSize = 14
-	box.ClearTextOnFocus = false
-	box.Parent = frame
-	Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
-
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, -40, 0, 34)
-	btn.Position = UDim2.fromOffset(20, 145)
-	btn.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
-	btn.Text = "Unlock"
-	btn.TextColor3 = Color3.new(1, 1, 1)
-	btn.Font = Enum.Font.GothamBold
-	btn.TextSize = 14
-	btn.Parent = frame
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-
-	local function try()
-		if box.Text:lower():gsub("%s+", "") == KEY then
-			unlocked = true
-			sg:Destroy()
-		else
-			btn.Text = "Wrong key"
-			task.delay(1, function() if btn.Parent then btn.Text = "Unlock" end end)
-		end
-	end
-	btn.MouseButton1Click:Connect(try)
-	box.FocusLost:Connect(function(enter) if enter then try() end end)
-	while not unlocked do task.wait(0.1) end
-end
-
--- RAYFIELD
-local Rayfield
-local function loadRayfield(url, label)
-	local ok, result = pcall(function()
-		local source = game:HttpGet(url)
-		if not source or #source == 0 then error(label .. " returned empty source") end
-		local fn = loadstring(source)
-		if not fn then error(label .. " loadstring failed") end
-		return fn()
-	end)
-	if ok and result then return result end
-	warn("[Huntsaken] " .. label .. " ERROR:", result)
-	return nil
-end
-
-Rayfield = loadRayfield("https://sirius.menu/rayfield", "Rayfield")
-if not Rayfield then
-	Rayfield = loadRayfield("https://raw.githubusercontent.com/sirius-menu/rayfield/refs/heads/main/source.lua", "Rayfield GitHub fallback")
-end
-if not Rayfield then error("[Huntsaken] Rayfield failed to load") end
-
-local Window = Rayfield:CreateWindow({
-	Name = "Huntsaken | Slim",
-	LoadingTitle = "Huntsaken",
-	LoadingSubtitle = "Slim Build",
-	Theme = "Default",
-	ToggleUIKeybind = "K",
-	DisableRayfieldPrompts = true,
-	ConfigurationSaving = { Enabled = true, FolderName = "Huntsaken", FileName = "Config_Slim" },
-	Discord = { Enabled = false },
-	KeySystem = false,
-})
-
-if not Window then error("[Huntsaken] CreateWindow failed") end
-
+-- ============================================================
 -- STATE
+-- ============================================================
 local S = {
-	KillerEsp = false, SurvivorEsp = false,
-	KillerBox = false, SurvivorBox = false,
-	KillerName = false, SurvivorName = false,
-	KillerDist = false, SurvivorDist = false,
-	KillerTracer = false, SurvivorTracer = false,
-	KillerChams = false, SurvivorChams = false,
-	TeamCheck = false,
-	MaxEspDist = 500,
-	KillerColor = Color3.fromRGB(255, 40, 40),
-	SurvivorColor = Color3.fromRGB(40, 255, 40),
-	BoxColor = Color3.fromRGB(255, 255, 255),
-	NameColor = Color3.fromRGB(255, 255, 255),
+    NormalAim       = false,
+    AimMode         = "Camera",       -- "Camera" | "HRP" | "HRP+Camera"
+    Smooth          = 0.35,
+    Debug           = false,
+    MatchActive     = false,
+    PlayingSurvivor = false,
 
-	TrapEsp = false, MedkitEsp = false, BloxyEsp = false, GenEsp = false, PizzaEsp = false,
-	ItemColor = Color3.fromRGB(255, 200, 40),
-
-	InfStam = false, CustomStam = false,
-	MaxStam = 100, StamGain = 20, StamLoss = 10, SprintSpeed = 20,
-
-	AutoGen = false, GenCD = 1.5,
+    -- Prediction
+    PredictMode     = "Both",         -- "Off" | "Ping" | "Velocity" | "Both"
+    PredictLead     = 0.15,           -- velocity lead (seconds)
+    PingMultiplier  = 1.0,            -- scales ping half-life
 }
 
+-- ============================================================
+-- WHITELIST  (ONLY these three abilities will trigger aim)
+-- ============================================================
+local ABILITY_ANIM_KEYS = {
+    -- Shedletsky
+    Slash       = true,
+
+    -- Chance — "Shoot" ability spans these 4 anims
+    AimGun      = true,
+    GunFire     = true,
+    GunExplode  = true,
+    GunFail     = true,
+
+    -- Two Time — "Dagger" ability spans Stab + Lunge
+    Stab        = true,
+    LungeStart  = true,
+    Lunge       = true,
+}
+
+local ABILITY_SOUND_KEYS = {
+    -- Shedletsky
+    Slash       = true,
+
+    -- Chance
+    GunFire     = true,
+    GunExplode  = true,
+    GunFail     = true,
+    Shoot       = true,
+
+    -- Two Time
+    Stab        = true,
+    Lunge       = true,
+}
+
+-- Abilities that use ping-based prediction (ranged / projectile)
+local PING_ABILITIES = {
+    AimGun     = true,
+    GunFire    = true,
+    GunExplode = true,
+    GunFail    = true,
+}
+
+-- ============================================================
 -- HELPERS
+-- ============================================================
 local function getRoot(m)
-	return m and (m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart)
+    return m and (m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart)
 end
 
-local function folderKids(name)
-	local f = Workspace:FindFirstChild("Players") and Workspace.Players:FindFirstChild(name)
-	if not f then return {} end
-	local t = {}
-	for _, c in ipairs(f:GetChildren()) do
-		if c:IsA("Model") then table.insert(t, c) end
-	end
-	return t
+local function getMyRole()
+    local c = LocalPlayer.Character
+    local p = c and c.Parent
+    if p and (p.Name == "Survivors" or p.Name == "Killers") then return p.Name end
+    return nil
 end
 
-local function getKillers() return folderKids("Killers") end
-local function getSurvivors() return folderKids("Survivors") end
+local function getTargetFolder()
+    local players = Workspace:FindFirstChild("Players")
+    if not players then return nil end
+    return players:FindFirstChild("Killers")   -- survivor script → aim at killers
+end
 
--- ITEM CONFIG
-local ITEM_KEYWORDS = {
-	"trap", "beartrap", "bear trap", "medkit", "med kit", "bloxy", "cola",
-	"pizza", "slice", "bandage", "healthkit", "health kit", "pumpkin",
-	"candy", "battery", "crowbar", "toolbox", "nail", "wire", "fuse",
-	"puzzle", "generator", "gen", "radio", "phone", "key", "gear",
-	"flashlight", "torch", "candle", "umbrella", "rope", "duct tape",
-	"scrap", "metal", "wood", "plate", "wirecutters", "wrench",
+local function notify(title, text, dur)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = title or "HunterAim", Text = text or "", Duration = dur or 4,
+        })
+    end)
+end
+
+local function getPing()
+    local ok, v = pcall(function() return LocalPlayer:GetNetworkPing() end)
+    if ok and type(v) == "number" then return v end
+    ok, v = pcall(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
+    end)
+    if ok and type(v) == "number" then return v end
+    return 0
+end
+
+-- ============================================================
+-- ASSET READING
+-- ============================================================
+local Assets = ReplicatedStorage:FindFirstChild("Assets")
+    or ReplicatedStorage:WaitForChild("Assets", 10)
+
+local myAbilityAnimIds  = {}   -- [animId] = abilityName
+local myAbilitySoundIds = {}   -- [soundId] = abilityName
+
+local function pushIdsFromValue(value, intoSet, abilityName)
+    if type(value) == "string" or type(value) == "number" then
+        local id = tostring(value):match("%d+")
+        if id and not intoSet[id] then intoSet[id] = abilityName end
+    elseif type(value) == "table" then
+        for _, v in pairs(value) do
+            pushIdsFromValue(v, intoSet, abilityName)
+        end
+    end
+end
+
+-- Read every sound table name we've seen in Forsaken configs.
+local SOUND_FIELDS = {
+    "Sounds", "Sound", "SFX", "Sfx", "SoundEffects", "SoundIds",
 }
 
-local function nameMatchesItem(name, filter)
-	if not name then return false end
-	local n = name:lower()
-	if filter then
-		if n:find(filter, 1, true) then return true end
-	else
-		for _, kw in ipairs(ITEM_KEYWORDS) do
-			if n:find(kw, 1, true) then return true end
-		end
-	end
-	return false
+local function readConfigAnimations(module, charName, skinName)
+    local ok, cfg = pcall(require, module)
+    if not ok or type(cfg) ~= "table" then return end
+
+    if type(cfg.Animations) == "table" then
+        for key, value in pairs(cfg.Animations) do
+            if ABILITY_ANIM_KEYS[key] then
+                pushIdsFromValue(value, myAbilityAnimIds, key)
+            end
+        end
+    end
+
+    for _, field in ipairs(SOUND_FIELDS) do
+        local soundTable = cfg[field]
+        if type(soundTable) == "table" then
+            for key, value in pairs(soundTable) do
+                if ABILITY_SOUND_KEYS[key] then
+                    pushIdsFromValue(value, myAbilitySoundIds, key)
+                end
+            end
+        end
+    end
+
+    print(string.format("[HunterAim] Loaded config: %s:%s", tostring(charName), tostring(skinName)))
 end
 
-local function isItemModel(inst)
-	if not inst or not inst.Parent then return false end
-	if not (inst:IsA("Model") or inst:IsA("Tool") or inst:IsA("BasePart")) then return false end
-	local playersFolder = Workspace:FindFirstChild("Players")
-	if playersFolder and inst:IsDescendantOf(playersFolder) then return false end
-	local n = inst.Name:lower()
-	if n == "baseplate" or n == "camera" or n == "terrain" then return false end
-	return true
+local function loadMyAbilityIds(char)
+    myAbilityAnimIds  = {}
+    myAbilitySoundIds = {}
+
+    if not Assets then
+        warn("[HunterAim] ReplicatedStorage.Assets not found")
+        return
+    end
+
+    local charName = char:GetAttribute("CharacterName") or char.Name
+    local skinName = char:GetAttribute("SkinName") or "Default"
+
+    -- 1) Base: Assets.Survivors.<Name>.Config
+    local survivorsFolder = Assets:FindFirstChild("Survivors")
+    local survivorFolder  = survivorsFolder and survivorsFolder:FindFirstChild(charName)
+    if survivorFolder then
+        local baseCfg = survivorFolder:FindFirstChild("Config")
+        if baseCfg then
+            readConfigAnimations(baseCfg, charName, "Default")
+        end
+    end
+
+    -- 2) Skin: Assets.Skins.Survivors.<Name>.<Skin>.Config
+    if skinName and skinName ~= "Default" then
+        local skinsRoot  = Assets:FindFirstChild("Skins")
+        local skinsSurv  = skinsRoot and skinsRoot:FindFirstChild("Survivors")
+        local skinChar   = skinsSurv and skinsSurv:FindFirstChild(charName)
+        local skinFolder = skinChar and skinChar:FindFirstChild(skinName)
+        if skinFolder then
+            local skinCfg = skinFolder:FindFirstChild("Config")
+            if skinCfg then
+                readConfigAnimations(skinCfg, charName, skinName)
+            end
+        end
+    end
+
+    local nA, nS = 0, 0
+    for _ in pairs(myAbilityAnimIds)  do nA += 1 end
+    for _ in pairs(myAbilitySoundIds) do nS += 1 end
+    print(string.format("[HunterAim] %s:%s → %d anim id(s), %d sound id(s)",
+        charName, skinName, nA, nS))
 end
 
-local function getItemPart(inst)
-	if inst:IsA("BasePart") then return inst end
-	if inst:IsA("Model") or inst:IsA("Tool") then
-		return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
-	end
-	return nil
+-- ============================================================
+-- EVENT GATE
+-- ============================================================
+local eventActive    = false
+local eventRefCount  = 0
+local currentAbility = nil
+
+local function pushEvent(kind, id, name)
+    eventRefCount += 1
+    eventActive = true
+    currentAbility = name
+    if S.Debug then
+        print(string.format("[HA EVENT START (%d)] [%s] id=%s name=%s",
+            eventRefCount, kind, tostring(id), tostring(name or "")))
+    end
 end
 
--- ESP
-local highlights = {}
-local billboards = {}
-local boxDrawings = {}
-local chams = {}
-local itemHighlights = {}
-local itemNames = {}
-
-local function createDrawing(class, props)
-	if not Drawing then return nil end
-	local ok, d = pcall(function() return Drawing.new(class) end)
-	if not ok or not d then return nil end
-	for k, v in pairs(props or {}) do pcall(function() d[k] = v end) end
-	return d
+local function popEvent(kind, id)
+    eventRefCount = math.max(0, eventRefCount - 1)
+    if eventRefCount == 0 then
+        eventActive = false
+        currentAbility = nil
+        if S.Debug then
+            print(string.format("[HA EVENT END] [%s] id=%s", kind, tostring(id)))
+        end
+    end
 end
 
-local function clearDrawing(d)
-	if d then pcall(function() d:Remove() end) end
+local function isPingAbility(abilityName)
+    return abilityName and PING_ABILITIES[abilityName] == true
 end
 
-local function clearHL(m)
-	if highlights[m] then pcall(function() highlights[m]:Destroy() end) highlights[m] = nil end
-	if billboards[m] then
-		for _, bb in pairs(billboards[m]) do pcall(function() bb:Destroy() end) end
-		billboards[m] = nil
-	end
-	if boxDrawings[m] then
-		for _, d in pairs(boxDrawings[m]) do clearDrawing(d) end
-		boxDrawings[m] = nil
-	end
-	if chams[m] then
-		for _, p in pairs(chams[m]) do pcall(function() p:Destroy() end) end
-		chams[m] = nil
-	end
+-- ---------- layer 1: animator on MY character ----------
+local myAnimConn   = nil
+local mySoundConns = {}
+
+local function attachAnimWatcher(char)
+    if myAnimConn then
+        pcall(function() myAnimConn:Disconnect() end)
+        myAnimConn = nil
+    end
+
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+    local animator = hum:WaitForChild("Animator", 5)
+    if not animator then return end
+
+    myAnimConn = animator.AnimationPlayed:Connect(function(track)
+        local anim = track.Animation
+        if not anim then return end
+        local animId = tostring(anim.AnimationId):match("%d+")
+        if not animId then return end
+
+        if S.Debug then
+            print("[HA MY ANIM]", animId, myAbilityAnimIds[animId] or anim.Name or "")
+        end
+
+        local abilityName = myAbilityAnimIds[animId]
+        if not abilityName then return end
+
+        pushEvent("anim", animId, abilityName)
+
+        local ended = false
+        local function finish()
+            if ended then return end
+            ended = true
+            popEvent("anim", animId)
+        end
+        track.Stopped:Once(finish)
+        local dur = track.Length
+        if not dur or dur <= 0 then dur = 0.5 end
+        task.delay(dur + 0.2, finish)
+    end)
 end
 
-local function applyHL(model, color)
-	if not model or not model.Parent then return end
-	local h = highlights[model]
-	if not h or not h.Parent then
-		h = Instance.new("Highlight")
-		h.Name = "HS_HL"
-		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		h.FillTransparency = 0.65
-		h.OutlineTransparency = 0
-		h.Parent = model
-		highlights[model] = h
-	end
-	h.FillColor, h.OutlineColor, h.Adornee = color, color, model
+-- ---------- layer 2: sounds on MY character ----------
+local function soundIdOf(sound)
+    if not sound or not sound.SoundId then return nil end
+    return tostring(sound.SoundId):match("%d+")
 end
 
-local function removeHLOnly(model)
-	if highlights[model] then pcall(function() highlights[model]:Destroy() end) highlights[model] = nil end
+local function hookMySound(s)
+    if not s:IsA("Sound") then return end
+    return s.Playing:Connect(function()
+        local sid = soundIdOf(s)
+        if not sid then return end
+
+        if S.Debug then
+            print("[HA MY SOUND]", sid, myAbilitySoundIds[sid] or s.Name or "")
+        end
+
+        local abilityName = myAbilitySoundIds[sid]
+        if not abilityName then return end
+
+        pushEvent("sound", sid, abilityName)
+        local dur = s.TimeLength
+        if not dur or dur <= 0 then dur = 0.4 end
+        task.delay(dur + 0.15, function()
+            popEvent("sound", sid)
+        end)
+    end)
 end
 
-local function applyNameTag(model, color, showDist)
-	if not model or not model.Parent then return end
-	local hrp = getRoot(model)
-	if not hrp then return end
-	local bb = billboards[model]
-	if not bb then
-		local gui = Instance.new("BillboardGui")
-		gui.Name = "HS_Name"
-		gui.Size = UDim2.fromOffset(200, 40)
-		gui.StudsOffset = Vector3.new(0, 3, 0)
-		gui.AlwaysOnTop = true
-		gui.Adornee = hrp
-		gui.Parent = hrp
+local function attachSoundWatcher(char)
+    for _, c in ipairs(mySoundConns) do
+        pcall(function() c:Disconnect() end)
+    end
+    mySoundConns = {}
 
-		local txt = Instance.new("TextLabel")
-		txt.Size = UDim2.fromScale(1, 1)
-		txt.BackgroundTransparency = 1
-		txt.Font = Enum.Font.GothamBold
-		txt.TextSize = 14
-		txt.TextStrokeTransparency = 0
-		txt.TextStrokeColor3 = Color3.new(0, 0, 0)
-		txt.TextColor3 = color
-		txt.Parent = gui
-
-		billboards[model] = { gui = gui, txt = txt }
-	else
-		if bb.txt then bb.txt.TextColor3 = color end
-	end
-	local entry = billboards[model]
-	if entry and entry.txt then
-		local base = model.Name
-		if showDist then
-			local myRoot = getRoot(LocalPlayer.Character)
-			if myRoot then
-				local dist = math.floor((hrp.Position - myRoot.Position).Magnitude)
-				entry.txt.Text = string.format("%s [%dm]", base, dist)
-			else
-				entry.txt.Text = base
-			end
-		else
-			entry.txt.Text = base
-		end
-	end
+    for _, s in ipairs(char:GetDescendants()) do
+        if s:IsA("Sound") then
+            local c = hookMySound(s)
+            if c then table.insert(mySoundConns, c) end
+        end
+    end
+    table.insert(mySoundConns, char.DescendantAdded:Connect(function(d)
+        if d:IsA("Sound") then
+            local c = hookMySound(d)
+            if c then table.insert(mySoundConns, c) end
+        end
+    end))
 end
 
-local function applyBox(model, color)
-	pcall(function()
-		local hrp = getRoot(model)
-		if not hrp then return end
-		local d = boxDrawings[model]
-		if not d then
-			d = {
-				box = createDrawing("Square", { Thickness = 1, Filled = false, Color = color, Transparency = 1, Visible = false }),
-				tracer = createDrawing("Line", { Thickness = 1, Color = color, Transparency = 1, Visible = false }),
-			}
-			boxDrawings[model] = d
-		end
-		if d.box then d.box.Color = color end
-		if d.tracer then d.tracer.Color = color end
-	end)
+-- ============================================================
+-- MATCH DETECTION
+-- ============================================================
+local lastSurvivorAnimTime = 0
+
+local function attachAnimActivity(char)
+    task.wait(0.5)
+    local hum = char:WaitForChild("Humanoid", 5)
+    local anim = hum and hum:WaitForChild("Animator", 5)
+    if not anim then return end
+    anim.AnimationPlayed:Connect(function(track)
+        local p = track.Priority
+        if p == Enum.AnimationPriority.Movement
+           or p == Enum.AnimationPriority.Idle
+           or p == Enum.AnimationPriority.Core then
+            lastSurvivorAnimTime = os.clock()
+        end
+    end)
 end
 
-local function applyChams(model, color)
-	if not model or not model.Parent then return end
-	local hrp = getRoot(model)
-	if not hrp then return end
-	if not chams[model] then chams[model] = {} end
-	local c = chams[model]
-	if c[hrp] and c[hrp].Parent then
-		c[hrp].Color = color
-		return
-	end
-	local part = Instance.new("Part")
-	part.Name = "HS_Chams"
-	part.Size = hrp.Size
-	part.CFrame = hrp.CFrame
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.Massless = true
-	part.Material = Enum.Material.ForceField
-	part.Color = color
-	part.Transparency = 0.55
-	part.Parent = Workspace
-	c[hrp] = part
+local function runMatchScan()
+    local myRoot = getRoot(LocalPlayer.Character)
+    local center = myRoot and myRoot.Position or Vector3.new(0, 50, 0)
+    local parts
+    local ok = pcall(function()
+        parts = Workspace:GetPartBoundsInBox(CFrame.new(center), Vector3.new(1000, 2000, 1000))
+    end)
+    if not ok or not parts then return false end
+    for _, part in ipairs(parts) do
+        local model = part:FindFirstAncestorOfClass("Model")
+        if model and model.Parent and model.Parent.Name == "Killers" then
+            return true
+        end
+    end
+    return false
 end
 
-local function updateChams()
-	for model, list in pairs(chams) do
-		if not model.Parent then
-			for _, p in pairs(list) do pcall(function() p:Destroy() end) end
-			chams[model] = nil
-		else
-			local hrp = getRoot(model)
-			for part, inst in pairs(list) do
-				if part ~= hrp or not part.Parent then
-					pcall(function() inst:Destroy() end)
-					list[part] = nil
-				else
-					inst.CFrame = hrp.CFrame
-					inst.Size = hrp.Size
-				end
-			end
-		end
-	end
+local function isPlayingSurvivor()
+    if getMyRole() ~= "Survivors" then return false end
+    return (os.clock() - lastSurvivorAnimTime) < 3
 end
 
-local function shouldSkip(model)
-	if model == LocalPlayer.Character then return true end
-	if not S.TeamCheck then return false end
-	local myChar = LocalPlayer.Character
-	if not myChar then return false end
-	local myFolder = myChar.Parent and myChar.Parent.Name
-	if not myFolder then return false end
-	local theirFolder = model.Parent and model.Parent.Name
-	return myFolder == theirFolder
+-- ============================================================
+-- CHARACTER ATTACH
+-- ============================================================
+local function attachToCharacter(char)
+    if char ~= LocalPlayer.Character then return end
+
+    local t0 = os.clock()
+    while not (char:GetAttribute("CharacterName")) and os.clock() - t0 < 3 do
+        task.wait(0.1)
+    end
+
+    loadMyAbilityIds(char)
+    task.spawn(attachAnimWatcher, char)
+    task.spawn(attachSoundWatcher, char)
+    task.spawn(attachAnimActivity, char)
+
+    local n, s = 0, 0
+    for _ in pairs(myAbilityAnimIds)  do n += 1 end
+    for _ in pairs(myAbilitySoundIds) do s += 1 end
+    if n + s > 0 then
+        notify("✓ HunterAim Ready",
+            string.format("%s — %d anim / %d sound", char.Name, n, s), 4)
+    end
 end
 
-local function renderEspForModel(model, color, opts)
-	if shouldSkip(model) then clearHL(model) return end
-	local hrp = getRoot(model)
-	local myRoot = getRoot(LocalPlayer.Character)
-	if not hrp or not myRoot then return end
-	local dist = (hrp.Position - myRoot.Position).Magnitude
-	if S.MaxEspDist > 0 and dist > S.MaxEspDist then
-		clearHL(model)
-		return
-	end
-	if opts.hl then applyHL(model, color) else removeHLOnly(model) end
-	if opts.name then applyNameTag(model, S.NameColor, opts.dist) end
-	if opts.box or opts.tracer then applyBox(model, opts.box and S.BoxColor or color) end
-	if opts.chams then applyChams(model, color) end
+if LocalPlayer.Character then
+    task.spawn(attachToCharacter, LocalPlayer.Character)
 end
+LocalPlayer.CharacterAdded:Connect(function(c)
+    eventActive    = false
+    eventRefCount  = 0
+    currentAbility = nil
+    task.wait(0.3)
+    task.spawn(attachToCharacter, c)
+end)
 
-local function updateBillboardDist()
-	for model, bb in pairs(billboards) do
-		if not model.Parent then
-			for _, e in pairs(bb) do pcall(function() e:Destroy() end) end
-			billboards[model] = nil
-		else
-			local parentName = model.Parent and model.Parent.Name
-			local showK = S.KillerName and parentName == "Killers"
-			local showS = S.SurvivorName and parentName == "Survivors"
-			local showDist = (S.KillerDist and parentName == "Killers") or (S.SurvivorDist and parentName == "Survivors")
-			if not (showK or showS) then
-				if bb.gui then pcall(function() bb.gui:Destroy() end) end
-				billboards[model] = nil
-			else
-				applyNameTag(model, S.NameColor, showDist)
-			end
-		end
-	end
-end
+task.spawn(function()
+    while true do
+        task.wait(2)
+        pcall(function()
+            S.MatchActive     = runMatchScan()
+            S.PlayingSurvivor = isPlayingSurvivor()
+        end)
+    end
+end)
 
-local function updateBoxesAndTracers()
-	for model, d in pairs(boxDrawings) do
-		if not model.Parent or not getRoot(model) then
-			for _, x in pairs(d) do clearDrawing(x) end
-			boxDrawings[model] = nil
-		else
-			local hrp = getRoot(model)
-			local myRoot = getRoot(LocalPlayer.Character)
-			local parentName = model.Parent and model.Parent.Name
-			local showBox = (S.KillerBox and parentName == "Killers") or (S.SurvivorBox and parentName == "Survivors")
-			local showTracer = (S.KillerTracer and parentName == "Killers") or (S.SurvivorTracer and parentName == "Survivors")
-			local skip = shouldSkip(model)
-			local dist = myRoot and (hrp.Position - myRoot.Position).Magnitude or 0
-			local tooFar = S.MaxEspDist > 0 and dist > S.MaxEspDist
+-- ============================================================
+-- CACHED TARGET (nearest killer)
+-- ============================================================
+local cachedTargetHRP = nil
 
-			if d.box then
-				if showBox and not skip and not tooFar then
-					local pos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-					if onScreen then
-						local topPos = Camera:WorldToViewportPoint(hrp.Position + Vector3.new(0, 3, 0))
-						local botPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
-						local height = math.abs(topPos.Y - botPos.Y)
-						local width = height / 2
-						d.box.Size = Vector2.new(width, height)
-						d.box.Position = Vector2.new(pos.X - width/2, pos.Y - height/2)
-						d.box.Visible = true
-						d.box.Color = (parentName == "Killers") and S.KillerColor or S.SurvivorColor
-					else
-						d.box.Visible = false
-					end
-				else
-					d.box.Visible = false
-				end
-			end
-
-			if d.tracer then
-				if showTracer and not skip and not tooFar then
-					local pos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
-					if onScreen then
-						d.tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
-						d.tracer.To = Vector2.new(pos.X, pos.Y)
-						d.tracer.Visible = true
-						d.tracer.Color = (parentName == "Killers") and S.KillerColor or S.SurvivorColor
-					else
-						d.tracer.Visible = false
-					end
-				else
-					d.tracer.Visible = false
-				end
-			end
-		end
-	end
-end
-
-local function refreshEsp()
-	for m in pairs(highlights) do if not m.Parent then clearHL(m) end end
-
-	for _, k in ipairs(getKillers()) do
-		renderEspForModel(k, S.KillerColor, {
-			hl = S.KillerEsp, name = S.KillerName, box = S.KillerBox,
-			tracer = S.KillerTracer, chams = S.KillerChams, dist = S.KillerDist,
-		})
-		if not S.KillerEsp then removeHLOnly(k) end
-	end
-	for _, s in ipairs(getSurvivors()) do
-		renderEspForModel(s, S.SurvivorColor, {
-			hl = S.SurvivorEsp, name = S.SurvivorName, box = S.SurvivorBox,
-			tracer = S.SurvivorTracer, chams = S.SurvivorChams, dist = S.SurvivorDist,
-		})
-		if not S.SurvivorEsp then removeHLOnly(s) end
-	end
-
-	updateBillboardDist()
-	updateBoxesAndTracers()
-	updateChams()
-end
-
--- ITEM ESP
-local function clearItemHL(inst)
-	if itemHighlights[inst] then pcall(function() itemHighlights[inst]:Destroy() end) itemHighlights[inst] = nil end
-	if itemNames[inst] then
-		pcall(function() itemNames[inst]:Destroy() end)
-		itemNames[inst] = nil
-	end
-end
-
-local function applyItemHL(inst, color)
-	if not inst or not inst.Parent then return end
-	local h = itemHighlights[inst]
-	if not h or not h.Parent then
-		h = Instance.new("Highlight")
-		h.Name = "HS_ItemHL"
-		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		h.FillTransparency = 0.5
-		h.OutlineTransparency = 0
-		h.FillColor = color
-		h.OutlineColor = color
-		h.Adornee = inst
-		h.Parent = inst
-		itemHighlights[inst] = h
-	end
-	h.FillColor, h.OutlineColor = color, color
-end
-
-local function applyItemName(inst, color)
-	if not inst or not inst.Parent then return end
-	local part = getItemPart(inst)
-	if not part then return end
-	local bb = itemNames[inst]
-	if not bb or not bb.Parent then
-		bb = Instance.new("BillboardGui")
-		bb.Name = "HS_ItemName"
-		bb.Size = UDim2.fromOffset(160, 30)
-		bb.StudsOffset = Vector3.new(0, 2, 0)
-		bb.AlwaysOnTop = true
-		bb.Adornee = part
-		bb.Parent = part
-		local txt = Instance.new("TextLabel")
-		txt.Size = UDim2.fromScale(1, 1)
-		txt.BackgroundTransparency = 1
-		txt.Font = Enum.Font.GothamBold
-		txt.TextSize = 12
-		txt.TextStrokeTransparency = 0
-		txt.TextStrokeColor3 = Color3.new(0, 0, 0)
-		txt.TextColor3 = color
-		txt.Text = inst.Name
-		txt.Parent = bb
-		itemNames[inst] = bb
-	else
-		local txt = bb:FindFirstChildOfClass("TextLabel")
-		if txt then txt.TextColor3 = color end
-	end
-end
-
-local function itemFilterPass(inst)
-	if not isItemModel(inst) then return false end
-	local n = inst.Name
-	if S.TrapEsp and nameMatchesItem(n, "trap") then return true end
-	if S.MedkitEsp and (nameMatchesItem(n, "medkit") or nameMatchesItem(n, "med kit") or nameMatchesItem(n, "bandage") or nameMatchesItem(n, "health")) then return true end
-	if S.BloxyEsp and (nameMatchesItem(n, "bloxy") or nameMatchesItem(n, "cola")) then return true end
-	if S.GenEsp and (nameMatchesItem(n, "generator") or nameMatchesItem(n, "gen") or nameMatchesItem(n, "puzzle")) then return true end
-	if S.PizzaEsp and (nameMatchesItem(n, "pizza") or nameMatchesItem(n, "slice")) then return true end
-	return false
-end
-
-local function refreshItemEsp()
-	for inst in pairs(itemHighlights) do
-		if not inst.Parent then clearItemHL(inst) end
-	end
-	for inst in pairs(itemNames) do
-		if not inst.Parent then clearItemHL(inst) end
-	end
-
-	local anyOn = S.TrapEsp or S.MedkitEsp or S.BloxyEsp or S.GenEsp or S.PizzaEsp
-	if not anyOn then
-		for inst in pairs(itemHighlights) do clearItemHL(inst) end
-		return
-	end
-
-	for _, d in ipairs(Workspace:GetDescendants()) do
-		if itemFilterPass(d) then
-			applyItemHL(d, S.ItemColor)
-			applyItemName(d, S.ItemColor)
-		end
-	end
+local function updateCachedTarget()
+    local myRoot = getRoot(LocalPlayer.Character)
+    if not myRoot then cachedTargetHRP = nil return end
+    local folder = getTargetFolder()
+    if not folder then cachedTargetHRP = nil return end
+    local best, bestD = nil, 500
+    for _, s in ipairs(folder:GetChildren()) do
+        if s:IsA("Model") and s ~= LocalPlayer.Character then
+            local hrp = s:FindFirstChild("HumanoidRootPart")
+            local hum = s:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                local d = (hrp.Position - myRoot.Position).Magnitude
+                if d < bestD then bestD = d; best = hrp end
+            end
+        end
+    end
+    cachedTargetHRP = best
 end
 
 task.spawn(function()
-	while true do
-		task.wait(2)
-		pcall(refreshEsp)
-		pcall(refreshItemEsp)
-	end
-end)
-
-RunService.RenderStepped:Connect(function()
-	if S.KillerBox or S.SurvivorBox or S.KillerTracer or S.SurvivorTracer or S.KillerChams or S.SurvivorChams then
-		pcall(updateBoxesAndTracers)
-		pcall(updateChams)
-	end
-end)
-
--- STAMINA
-local function applyStamina()
-	local ok, sprint = pcall(function()
-		return require(ReplicatedStorage.Systems.Character.Game.Sprinting)
-	end)
-	if not ok or not sprint then return end
-	if S.InfStam then
-		pcall(function()
-			sprint.Stamina = sprint.MaxStamina or S.MaxStam
-			if sprint.StaminaLossDisabled ~= nil then sprint.StaminaLossDisabled = true end
-		end)
-	end
-	if S.CustomStam then
-		pcall(function()
-			sprint.MaxStamina = S.MaxStam
-			sprint.StaminaGain = S.StamGain
-			if sprint.StaminaLoss then sprint.StaminaLoss = S.StamLoss end
-			if sprint.StaminaDrain then sprint.StaminaDrain = S.StamLoss end
-			if sprint.SprintSpeed then sprint.SprintSpeed = S.SprintSpeed end
-		end)
-	end
-end
-
-RunService.Heartbeat:Connect(function()
-	if S.InfStam or S.CustomStam then pcall(applyStamina) end
-end)
-
--- AUTO GEN
-local genConns, genFlag, genThread
-
-local function isNoliGenerator(gen)
-	if not gen then return false end
-	local n = (gen.Name .. " " .. (gen:GetFullName() or "")):lower()
-	if n:find("noli") then return true end
-	if gen:GetAttribute("Noli") or gen:GetAttribute("IsNoli") then return true end
-	for _, d in ipairs(gen:GetDescendants()) do
-		if d.Name:lower():find("noli") then return true end
-	end
-	return false
-end
-
-local function findGenerators(skipNoli)
-	local found, seen = {}, {}
-	local function add(child)
-		if seen[child] then return end
-		if child.Name ~= "Generator" and child.Name ~= "FakeGenerator" then return end
-		if skipNoli and isNoliGenerator(child) then return end
-		seen[child] = true
-		table.insert(found, child)
-	end
-	local function scan(root)
-		if not root then return end
-		for _, child in ipairs(root:GetChildren()) do add(child) end
-	end
-	scan(Workspace:FindFirstChild("Map"))
-	local ingame = Workspace:FindFirstChild("Ingame")
-	if ingame then
-		scan(ingame:FindFirstChild("Map"))
-		scan(ingame)
-	end
-	if #found == 0 then
-		for _, d in ipairs(Workspace:GetDescendants()) do
-			if d.Name == "Generator" or d.Name == "FakeGenerator" then add(d) end
-		end
-	end
-	return found
-end
-
-local function repairNearby()
-	local hrp = getRoot(LocalPlayer.Character)
-	if not hrp then return end
-	for _, gen in ipairs(findGenerators(true)) do
-		local progress = gen:FindFirstChild("Progress")
-		local main = gen:FindFirstChild("Main") or gen:FindFirstChild("Base") or gen.PrimaryPart
-		if not main then
-			for _, c in ipairs(gen:GetChildren()) do
-				if c:IsA("BasePart") then main = c break end
-			end
-		end
-		if main and progress and tonumber(progress.Value) and progress.Value < 100 then
-			if (hrp.Position - main.Position).Magnitude < 14 then
-				local remotes = gen:FindFirstChild("Remotes")
-				local re = remotes and (remotes:FindFirstChild("RE") or remotes:FindFirstChildWhichIsA("RemoteEvent"))
-				if re then pcall(function() re:FireServer() end) end
-				for _, r in ipairs(gen:GetDescendants()) do
-					if r:IsA("RemoteEvent") and (r.Name == "RE" or r.Name:lower():find("repair") or r.Name:lower():find("gen")) then
-						pcall(function() r:FireServer() end)
-					end
-				end
-			end
-		end
-	end
-end
-
-local function setAutoGen(on)
-	S.AutoGen = on
-	genFlag = false
-	if genThread then task.cancel(genThread) genThread = nil end
-	if genConns then
-		for _, c in ipairs(genConns) do pcall(function() c:Disconnect() end) end
-		genConns = nil
-	end
-	if not on then return end
-
-	local function loop()
-		while genFlag do
-			local t0 = os.clock()
-			while genFlag and os.clock() - t0 < S.GenCD do RunService.Heartbeat:Wait() end
-			if not genFlag then break end
-			pcall(repairNearby)
-		end
-	end
-
-	local function start()
-		if genFlag then return end
-		genFlag = true
-		genThread = task.spawn(loop)
-	end
-	local function stop()
-		genFlag = false
-		if genThread then task.cancel(genThread) genThread = nil end
-	end
-
-	local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 8)
-	genConns = {}
-	if pg then
-		table.insert(genConns, pg.ChildAdded:Connect(function(c)
-			if c.Name == "PuzzleUI" or c.Name:lower():find("puzzle") or c.Name:lower():find("generator") then start() end
-		end))
-		table.insert(genConns, pg.ChildRemoved:Connect(function(c)
-			if c.Name == "PuzzleUI" or c.Name:lower():find("puzzle") then stop() end
-		end))
-		for _, c in ipairs(pg:GetChildren()) do
-			if c.Name == "PuzzleUI" or c.Name:lower():find("puzzle") then start() end
-		end
-	end
-	start()
-end
-
--- HUNTERAIM PATCH
-local function patchHunterAim(src)
-	-- Replace the broken drag/lock block with the working UserInputService version
-	local brokenPattern = "local locked = false\nlocal dragStart, startPos\n\nlocal function beginDrag%(input%)[%s%S]-end%s*\nend%s*\nend"
-
-	local fixedBlock = [[
-local locked = false
-
-lockBtn.MouseButton1Click:Connect(function()
-    locked = not locked
-    lockBtn.Text = locked and "🔒" or "🔓"
-    lockBtn.BackgroundColor3 = locked and Color3.fromRGB(200, 60, 60) or Color3.fromRGB(80, 80, 100)
-end)
-
-local dragging = false
-local dragStart = nil
-local startPos = nil
-
-local function beginDrag(input)
-    if locked then return end
-    dragging = true
-    dragStart = input.Position
-    startPos = panel.Position
-end
-
-titleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-       or input.UserInputType == Enum.UserInputType.Touch then
-        beginDrag(input)
+    while true do
+        task.wait(0.05)
+        pcall(updateCachedTarget)
     end
 end)
 
-panel.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-       or input.UserInputType == Enum.UserInputType.Touch then
-        local hit = PlayerGui:GetGuiObjectsAtPosition(input.Position.X, input.Position.Y)
-        for _, obj in ipairs(hit) do
-            if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-                return
+-- ============================================================
+-- PREDICTION
+-- ============================================================
+local function predictHRP(hrp)
+    if not hrp then return nil end
+    if S.PredictMode == "Off" then
+        return hrp.Position
+    end
+
+    local vel = hrp.AssemblyLinearVelocity or Vector3.new()
+    if vel.Magnitude > 200 then vel = Vector3.zero end
+
+    -- Ping only for Chance's gun. Shed + Two Time use velocity only.
+    local usePing = isPingAbility(currentAbility)
+
+    local velLead  = 0
+    local pingLead = 0
+
+    if S.PredictMode == "Velocity" or S.PredictMode == "Both" then
+        velLead = S.PredictLead
+    end
+
+    if usePing and (S.PredictMode == "Ping" or S.PredictMode == "Both") then
+        local ping = getPing() * 0.5 * S.PingMultiplier
+        pingLead = math.clamp(ping, 0, 0.5)
+    end
+
+    local totalLead = math.clamp(velLead + pingLead, 0, 0.75)
+    return hrp.Position + vel * totalLead
+end
+
+local function applyAim(targetPos, mode, smooth)
+    if not targetPos then return end
+    smooth = smooth or S.Smooth
+    if mode == "Camera" or mode == "HRP+Camera" then
+        Camera.CFrame = Camera.CFrame:Lerp(
+            CFrame.lookAt(Camera.CFrame.Position, targetPos), smooth)
+    end
+    if mode == "HRP" or mode == "HRP+Camera" then
+        local myRoot = LocalPlayer.Character
+            and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if myRoot then
+            local flat = Vector3.new(targetPos.X, myRoot.Position.Y, targetPos.Z)
+            if (flat - myRoot.Position).Magnitude > 0.1 then
+                myRoot.CFrame = myRoot.CFrame:Lerp(
+                    CFrame.lookAt(myRoot.Position, flat), smooth)
             end
         end
-        beginDrag(input)
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    if not S.NormalAim then return end
+    if not S.MatchActive then return end
+    if not isPlayingSurvivor() then return end
+
+    -- THE gate: only aim while one of the whitelisted abilities is playing
+    if not eventActive then return end
+
+    if not cachedTargetHRP or not cachedTargetHRP.Parent then return end
+
+    local targetPos = predictHRP(cachedTargetHRP)
+    applyAim(targetPos, S.AimMode)
+end)
+
+-- ============================================================
+-- GUI
+-- ============================================================
+local gui = Instance.new("ScreenGui")
+gui.Name = "HunterAimPanel"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
+local okp = pcall(function() gui.Parent = (gethui and gethui()) or CoreGui end)
+if not okp or not gui.Parent then gui.Parent = PlayerGui end
+if _G._HunterAimGui and _G._HunterAimGui.Parent then
+    pcall(function() _G._HunterAimGui:Destroy() end)
+end
+_G._HunterAimGui = gui
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.fromOffset(60, 60)
+toggleBtn.Position = UDim2.new(1, -160, 1, -80)
+toggleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+toggleBtn.Text = "HA"
+toggleBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 20
+toggleBtn.Active = true
+toggleBtn.Draggable = true
+toggleBtn.Parent = gui
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(1, 0)
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.fromOffset(500, 560)
+panel.Position = UDim2.fromScale(0.5, 0.5)
+panel.AnchorPoint = Vector2.new(0.5, 0.5)
+panel.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+panel.BorderSizePixel = 0
+panel.Visible = false
+panel.Active = true
+panel.Parent = gui
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 14)
+local ps = Instance.new("UIStroke", panel); ps.Color = Color3.fromRGB(100, 180, 255); ps.Thickness = 2
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 44)
+titleBar.BackgroundColor3 = Color3.fromRGB(30, 45, 60)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = panel
+Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 14)
+local tbFix = Instance.new("Frame")
+tbFix.Size = UDim2.new(1, 0, 0, 14)
+tbFix.Position = UDim2.new(0, 0, 1, -14)
+tbFix.BackgroundColor3 = Color3.fromRGB(30, 45, 60)
+tbFix.BorderSizePixel = 0
+tbFix.Parent = titleBar
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -120, 1, 0)
+titleText.Position = UDim2.fromOffset(12, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "HunterAim v10"
+titleText.TextColor3 = Color3.fromRGB(140, 200, 255)
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 16
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(30, 30)
+closeBtn.Position = UDim2.new(1, -36, 0, 7)
+closeBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
+closeBtn.Text = "×"
+closeBtn.TextColor3 = Color3.new(1, 1, 1)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 20
+closeBtn.Parent = titleBar
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(1, 0)
+closeBtn.MouseButton1Click:Connect(function() panel.Visible = false end)
+toggleBtn.MouseButton1Click:Connect(function() panel.Visible = not panel.Visible end)
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -24, 1, -68)
+content.Position = UDim2.fromOffset(12, 56)
+content.BackgroundTransparency = 1
+content.Parent = panel
+
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size = UDim2.new(1, 0, 1, 0)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 4
+scroll.ScrollBarImageColor3 = Color3.fromRGB(100, 180, 255)
+scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.Active = true
+scroll.Parent = content
+
+local list = Instance.new("UIListLayout")
+list.Padding = UDim.new(0, 8)
+list.SortOrder = Enum.SortOrder.LayoutOrder
+list.Parent = scroll
+
+local function makeHeader(text)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -8, 0, 26)
+    l.BackgroundTransparency = 1
+    l.Text = "— " .. text .. " —"
+    l.TextColor3 = Color3.fromRGB(140, 200, 255)
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = scroll
+    return l
+end
+
+local function makeLabel(text, color)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -8, 0, 22)
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = color or Color3.fromRGB(200, 200, 220)
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = scroll
+    return l
+end
+
+local function makeToggle(name, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -8, 0, 48)
+    row.BackgroundColor3 = Color3.fromRGB(32, 32, 42)
+    row.BorderSizePixel = 0
+    row.Parent = scroll
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rs = Instance.new("UIStroke", row); rs.Color = Color3.fromRGB(60, 60, 80); rs.Thickness = 1
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -80, 1, 0)
+    l.Position = UDim2.fromOffset(14, 0)
+    l.BackgroundTransparency = 1
+    l.Text = name
+    l.TextColor3 = Color3.fromRGB(230, 230, 240)
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 14
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(50, 26)
+    btn.Position = UDim2.new(1, -64, 0.5, -13)
+    btn.BackgroundColor3 = initial and Color3.fromRGB(100, 180, 255) or Color3.fromRGB(70, 70, 90)
+    btn.Text = initial and "ON" or "OFF"
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.Parent = row
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    btn.MouseButton1Click:Connect(function()
+        local state = btn.Text ~= "ON"
+        btn.Text = state and "ON" or "OFF"
+        btn.BackgroundColor3 = state and Color3.fromRGB(100, 180, 255) or Color3.fromRGB(70, 70, 90)
+        if callback then callback(state) end
+    end)
+    return btn
+end
+
+local function makeSlider(name, minV, maxV, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -8, 0, 58)
+    row.BackgroundColor3 = Color3.fromRGB(32, 32, 42)
+    row.BorderSizePixel = 0
+    row.Parent = scroll
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rs = Instance.new("UIStroke", row); rs.Color = Color3.fromRGB(60, 60, 80); rs.Thickness = 1
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -80, 0, 20)
+    l.Position = UDim2.fromOffset(14, 6)
+    l.BackgroundTransparency = 1
+    l.Text = name
+    l.TextColor3 = Color3.fromRGB(230, 230, 240)
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 13
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = row
+
+    local vl = Instance.new("TextLabel")
+    vl.Size = UDim2.new(0, 60, 0, 20)
+    vl.Position = UDim2.new(1, -74, 0, 6)
+    vl.BackgroundTransparency = 1
+    vl.Text = tostring(math.floor(initial * 100) / 100)
+    vl.TextColor3 = Color3.fromRGB(140, 200, 255)
+    vl.Font = Enum.Font.GothamBold
+    vl.TextSize = 13
+    vl.TextXAlignment = Enum.TextXAlignment.Right
+    vl.Parent = row
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(1, -28, 0, 10)
+    bg.Position = UDim2.new(0, 14, 0, 32)
+    bg.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+    bg.BorderSizePixel = 0
+    bg.Parent = row
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+    fill.BorderSizePixel = 0
+    fill.Parent = bg
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local function setV(v)
+        local pct = (v - minV) / (maxV - minV)
+        fill.Size = UDim2.new(pct, 0, 1, 0)
+        vl.Text = tostring(math.floor(v * 100) / 100)
+    end
+    setV(initial)
+
+    local dragging = false
+    local function apply(x)
+        local abs = bg.AbsolutePosition.X
+        local w = bg.AbsoluteSize.X
+        local pct = math.clamp((x - abs) / w, 0, 1)
+        local v = minV + pct * (maxV - minV)
+        setV(v)
+        if callback then callback(v) end
+    end
+
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            apply(input.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch then
+            apply(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    return row
+end
+
+local function makeButton(label, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -8, 0, 34)
+    b.BackgroundColor3 = Color3.fromRGB(60, 100, 150)
+    b.Text = label
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.Parent = scroll
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+
+-- ============================================================
+-- MENU
+-- ============================================================
+makeHeader("Main")
+makeToggle("Enable Aim", S.NormalAim, function(v) S.NormalAim = v end)
+makeToggle("Debug (print anims/sounds)", S.Debug, function(v) S.Debug = v end)
+
+makeHeader("Info")
+local infoLabel = makeLabel("Detecting survivor...", Color3.fromRGB(180, 220, 180))
+local abilityLabel = makeLabel("Active abilities: —", Color3.fromRGB(200, 200, 200))
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local nA, nS = 0, 0
+        for _ in pairs(myAbilityAnimIds)  do nA += 1 end
+        for _ in pairs(myAbilitySoundIds) do nS += 1 end
+        local char = LocalPlayer.Character
+        local name = char and (char:GetAttribute("CharacterName") or char.Name) or "?"
+        infoLabel.Text = string.format("%s  •  %d anim  •  %d sound  •  %.0f ms",
+            name, nA, nS, getPing() * 1000)
+
+        local names = {}
+        for _, n in pairs(myAbilityAnimIds) do names[n] = true end
+        local listStr = ""
+        for n in pairs(names) do
+            listStr = (listStr == "" and n) or (listStr .. ", " .. n)
+        end
+        abilityLabel.Text = "Active: " .. (listStr ~= "" and listStr or "—")
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
-    if not dragging then return end
-    if input.UserInputType == Enum.UserInputType.MouseMovement
-       or input.UserInputType == Enum.UserInputType.Touch then
-        local delta = input.Position - dragStart
-        panel.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + delta.X,
-            startPos.Y.Scale, startPos.Y.Offset + delta.Y
-        )
+makeHeader("Prediction")
+local predictModes = { "Off", "Ping", "Velocity", "Both" }
+local predictBtns = {}
+for _, mode in ipairs(predictModes) do
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -8, 0, 30)
+    b.BackgroundColor3 = (S.PredictMode == mode)
+        and Color3.fromRGB(100, 180, 255)
+        or Color3.fromRGB(45, 45, 60)
+    b.Text = mode
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.Parent = scroll
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    table.insert(predictBtns, { btn = b, mode = mode })
+    b.MouseButton1Click:Connect(function()
+        S.PredictMode = mode
+        for _, m in ipairs(predictBtns) do
+            m.btn.BackgroundColor3 = (m.mode == mode)
+                and Color3.fromRGB(100, 180, 255)
+                or Color3.fromRGB(45, 45, 60)
+        end
+    end)
+end
+
+makeSlider("Velocity lead (s)", 0, 0.5, S.PredictLead,
+    function(v) S.PredictLead = v end)
+
+makeSlider("Ping multiplier (Chance)", 0, 2, S.PingMultiplier,
+    function(v) S.PingMultiplier = v end)
+
+local predHint = Instance.new("TextLabel")
+predHint.Size = UDim2.new(1, -8, 0, 34)
+predHint.BackgroundTransparency = 1
+predHint.Text = "Ping/Both only applies to Chance's gun. Shed slash and Two Time stab use velocity only."
+predHint.TextColor3 = Color3.fromRGB(160, 180, 200)
+predHint.Font = Enum.Font.GothamMedium
+predHint.TextSize = 11
+predHint.TextWrapped = true
+predHint.TextXAlignment = Enum.TextXAlignment.Left
+predHint.Parent = scroll
+
+makeHeader("Smoothing")
+makeSlider("Smoothness", 0.05, 1, S.Smooth, function(v) S.Smooth = v end)
+
+makeHeader("Aim Mode")
+local modeBtns = {}
+local function makeModeBtn(label, mode)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -8, 0, 34)
+    b.BackgroundColor3 = (S.AimMode == mode) and Color3.fromRGB(100, 180, 255) or Color3.fromRGB(45, 45, 60)
+    b.Text = label
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.Parent = scroll
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    table.insert(modeBtns, { btn = b, mode = mode })
+    b.MouseButton1Click:Connect(function()
+        S.AimMode = mode
+        for _, m in ipairs(modeBtns) do
+            m.btn.BackgroundColor3 = (m.mode == mode) and Color3.fromRGB(100, 180, 255) or Color3.fromRGB(45, 45, 60)
+        end
+    end)
+end
+makeModeBtn("Camera", "Camera")
+makeModeBtn("HRP", "HRP")
+makeModeBtn("HRP + Camera", "HRP+Camera")
+
+makeHeader("Manual")
+makeButton("Reload survivor data", function()
+    if LocalPlayer.Character then
+        loadMyAbilityIds(LocalPlayer.Character)
+        notify("HunterAim", "Reloaded asset ids", 3)
     end
 end)
 
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-       or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = false
-        dragStart = nil
-    end
-end)]]
-
-	local patched, count = src:gsub(brokenPattern, fixedBlock, 1)
-	if count > 0 then
-		print("[Huntsaken] HunterAim drag patch applied")
-		return patched
-	end
-
-	-- Fallback: locate the block by anchors and slice it out
-	local startIdx = src:find("local locked = false", 1, true)
-	if not startIdx then
-		warn("[Huntsaken] HunterAim patch: start anchor missing")
-		return src
-	end
-
-	local lockBtnIdx = src:find("lockBtn.MouseButton1Click", startIdx, true)
-	if not lockBtnIdx then
-		warn("[Huntsaken] HunterAim patch: lockBtn anchor missing")
-		return src
-	end
-
-	-- Find end of the original broken block (the "lockBtn.MouseButton1Click" chain end)
-	local endIdx = src:find("end%)%s*\n", lockBtnIdx)
-	if not endIdx then
-		warn("[Huntsaken] HunterAim patch: end anchor missing")
-		return src
-	end
-	endIdx = endIdx + #"end)\n" - 1
-
-	local before = src:sub(1, startIdx - 1)
-	local after = src:sub(endIdx + 1)
-	local rebuilt = before .. fixedBlock .. after
-	print("[Huntsaken] HunterAim drag patch applied (fallback)")
-	return rebuilt
-end
-
--- UI
-local function notify(t, c)
-	pcall(function() Rayfield:Notify({ Title = t, Content = c, Duration = 3 }) end)
-end
-
-local TabVisual = Window:CreateTab("Visual", 4483362458)
-local TabItems = Window:CreateTab("Items", 4483362458)
-local TabStamina = Window:CreateTab("Stamina", 4483362458)
-local TabGen = Window:CreateTab("Generators", 4483362458)
-local TabLoader = Window:CreateTab("Loader", 4483362458)
-local TabCredits = Window:CreateTab("Credits", 4483362458)
-
--- VISUAL
-TabVisual:CreateSection("Killer ESP")
-TabVisual:CreateToggle({ Name = "Killer Highlight", CurrentValue = false, Flag = "KillerEsp", Callback = function(v) S.KillerEsp = v refreshEsp() end })
-TabVisual:CreateToggle({ Name = "Killer Box", CurrentValue = false, Flag = "KillerBox", Callback = function(v) S.KillerBox = v end })
-TabVisual:CreateToggle({ Name = "Killer Name", CurrentValue = false, Flag = "KillerName", Callback = function(v) S.KillerName = v refreshEsp() end })
-TabVisual:CreateToggle({ Name = "Killer Distance", CurrentValue = false, Flag = "KillerDist", Callback = function(v) S.KillerDist = v end })
-TabVisual:CreateToggle({ Name = "Killer Tracer", CurrentValue = false, Flag = "KillerTracer", Callback = function(v) S.KillerTracer = v end })
-TabVisual:CreateToggle({ Name = "Killer Chams", CurrentValue = false, Flag = "KillerChams", Callback = function(v) S.KillerChams = v if not v then updateChams() end end })
-TabVisual:CreateColorPicker({ Name = "Killer Color", Color = S.KillerColor, Flag = "KillerColor", Callback = function(c) S.KillerColor = c refreshEsp() end })
-
-TabVisual:CreateSection("Survivor ESP")
-TabVisual:CreateToggle({ Name = "Survivor Highlight", CurrentValue = false, Flag = "SurvivorEsp", Callback = function(v) S.SurvivorEsp = v refreshEsp() end })
-TabVisual:CreateToggle({ Name = "Survivor Box", CurrentValue = false, Flag = "SurvivorBox", Callback = function(v) S.SurvivorBox = v end })
-TabVisual:CreateToggle({ Name = "Survivor Name", CurrentValue = false, Flag = "SurvivorName", Callback = function(v) S.SurvivorName = v refreshEsp() end })
-TabVisual:CreateToggle({ Name = "Survivor Distance", CurrentValue = false, Flag = "SurvivorDist", Callback = function(v) S.SurvivorDist = v end })
-TabVisual:CreateToggle({ Name = "Survivor Tracer", CurrentValue = false, Flag = "SurvivorTracer", Callback = function(v) S.SurvivorTracer = v end })
-TabVisual:CreateToggle({ Name = "Survivor Chams", CurrentValue = false, Flag = "SurvivorChams", Callback = function(v) S.SurvivorChams = v if not v then updateChams() end end })
-TabVisual:CreateColorPicker({ Name = "Survivor Color", Color = S.SurvivorColor, Flag = "SurvivorColor", Callback = function(c) S.SurvivorColor = c refreshEsp() end })
-
-TabVisual:CreateSection("ESP Options")
-TabVisual:CreateToggle({ Name = "Team Check", CurrentValue = false, Flag = "TeamCheck", Callback = function(v) S.TeamCheck = v refreshEsp() end })
-TabVisual:CreateSlider({ Name = "Max ESP Distance (0 = unlimited)", Range = {0, 1000}, Increment = 25, CurrentValue = 500, Flag = "MaxEspDist", Callback = function(v) S.MaxEspDist = v end })
-TabVisual:CreateColorPicker({ Name = "Box / Tracer Color", Color = S.BoxColor, Flag = "BoxColor", Callback = function(c) S.BoxColor = c end })
-TabVisual:CreateColorPicker({ Name = "Name Tag Color", Color = S.NameColor, Flag = "NameColor", Callback = function(c) S.NameColor = c end })
-
-TabVisual:CreateSection("GUI Theme")
-TabVisual:CreateDropdown({
-	Name = "Theme",
-	Options = {"Default","AmberGlow","Amethyst","Bloom","DarkBlue","Green","Light","Ocean","Serenity"},
-	CurrentOption = {"Default"},
-	Flag = "UITheme",
-	Callback = function(opt)
-		local name = type(opt) == "table" and opt[1] or opt
-		local ok = pcall(function() Window.ModifyTheme(name) end)
-		if ok then notify("Theme", "Changed to " .. tostring(name)) end
-	end,
-})
-
--- ITEMS
-TabItems:CreateSection("Item ESP")
-TabItems:CreateToggle({ Name = "Trap ESP", CurrentValue = false, Flag = "TrapEsp", Callback = function(v) S.TrapEsp = v refreshItemEsp() end })
-TabItems:CreateToggle({ Name = "Medkit / Bandage ESP", CurrentValue = false, Flag = "MedkitEsp", Callback = function(v) S.MedkitEsp = v refreshItemEsp() end })
-TabItems:CreateToggle({ Name = "Bloxy Cola ESP", CurrentValue = false, Flag = "BloxyEsp", Callback = function(v) S.BloxyEsp = v refreshItemEsp() end })
-TabItems:CreateToggle({ Name = "Generator Part ESP", CurrentValue = false, Flag = "GenEsp", Callback = function(v) S.GenEsp = v refreshItemEsp() end })
-TabItems:CreateToggle({ Name = "Pizza ESP", CurrentValue = false, Flag = "PizzaEsp", Callback = function(v) S.PizzaEsp = v refreshItemEsp() end })
-TabItems:CreateColorPicker({ Name = "Item Color", Color = S.ItemColor, Flag = "ItemColor", Callback = function(c) S.ItemColor = c refreshItemEsp() end })
-TabItems:CreateButton({
-	Name = "Refresh Items Now",
-	Callback = function()
-		pcall(refreshItemEsp)
-		notify("Items", "Refreshed")
-	end,
-})
-
--- STAMINA
-TabStamina:CreateSection("Stamina")
-TabStamina:CreateToggle({ Name = "Infinite Stamina", CurrentValue = false, Flag = "InfStam", Callback = function(v) S.InfStam = v end })
-TabStamina:CreateToggle({ Name = "Custom Stamina", CurrentValue = false, Flag = "CustomStam", Callback = function(v) S.CustomStam = v end })
-TabStamina:CreateSlider({ Name = "Max Stamina", Range = {50, 300}, Increment = 5, CurrentValue = 100, Flag = "MaxStam", Callback = function(v) S.MaxStam = v end })
-TabStamina:CreateSlider({ Name = "Stamina Gain", Range = {1, 100}, Increment = 1, CurrentValue = 20, Flag = "StamGain", Callback = function(v) S.StamGain = v end })
-TabStamina:CreateSlider({ Name = "Stamina Loss", Range = {0, 50}, Increment = 1, CurrentValue = 10, Flag = "StamLoss", Callback = function(v) S.StamLoss = v end })
-TabStamina:CreateSlider({ Name = "Sprint Speed", Range = {10, 40}, Increment = 1, CurrentValue = 20, Flag = "SprintSpeed", Callback = function(v) S.SprintSpeed = v end })
-
--- GENERATORS
-TabGen:CreateSection("Auto Generator")
-TabGen:CreateToggle({ Name = "Auto Generator", CurrentValue = false, Flag = "AutoGen", Callback = setAutoGen })
-TabGen:CreateSlider({ Name = "Repair Cooldown", Range = {0.5, 8}, Increment = 0.1, CurrentValue = 1.5, Flag = "GenCD", Callback = function(v) S.GenCD = v end })
-TabGen:CreateButton({
-	Name = "Force Repair Now",
-	Callback = function()
-		pcall(repairNearby)
-		notify("Gen", "Repair attempt")
-	end,
-})
-
--- LOADER
-TabLoader:CreateSection("External Scripts")
-TabLoader:CreateButton({
-	Name = "Hunter Hub Auto Block",
-	Callback = function()
-		local ok, err = pcall(function()
-			loadstring(game:HttpGet("https://raw.githubusercontent.com/Noah0020/Hunter/main/Block"))()
-		end)
-		notify("Loader", ok and "Hunter Hub Auto Block loaded" or "Auto Block FAILED")
-		if not ok then warn("[Huntsaken]", err) end
-	end,
-})
-TabLoader:CreateButton({
-	Name = "Hunter Hub Aim (patched)",
-	Callback = function()
-		local ok, err = pcall(function()
-			local src = game:HttpGet("https://raw.githubusercontent.com/Noah0020/Hunteraim/main/Aim")
-			if not src or #src < 100 then error("Empty Aim source") end
-			src = patchHunterAim(src)
-			local fn, parseErr = loadstring(src)
-			if not fn then error("Parse error: " .. tostring(parseErr)) end
-			fn()
-		end)
-		notify("Loader", ok and "Hunter Hub Aim loaded (patched)" or "Aim FAILED")
-		if not ok then warn("[Huntsaken]", err) end
-	end,
-})
-TabLoader:CreateButton({
-	Name = "Execute Both",
-	Callback = function()
-		task.spawn(function()
-			local ok1 = pcall(function()
-				loadstring(game:HttpGet("https://raw.githubusercontent.com/Noah0020/Hunter/main/Block"))()
-			end)
-			notify("Loader", ok1 and "Auto Block loaded" or "Auto Block FAILED")
-		end)
-		task.wait(0.5)
-		task.spawn(function()
-			local ok2, err2 = pcall(function()
-				local src = game:HttpGet("https://raw.githubusercontent.com/Noah0020/Hunteraim/main/Aim")
-				if not src or #src < 100 then error("Empty Aim source") end
-				src = patchHunterAim(src)
-				local fn, parseErr = loadstring(src)
-				if not fn then error("Parse error: " .. tostring(parseErr)) end
-				fn()
-			end)
-			notify("Loader", ok2 and "Aim loaded (patched)" or "Aim FAILED")
-			if not ok2 then warn("[Huntsaken]", err2) end
-		end)
-	end,
-})
-
--- CREDITS
-TabCredits:CreateSection("Huntsaken")
-TabCredits:CreateParagraph({ Title = "Owner", Content = "viltrumite" })
-TabCredits:CreateParagraph({ Title = "Co owner", Content = "viltrumite" })
-TabCredits:CreateParagraph({ Title = "Helper", Content = "my gf" })
-TabCredits:CreateParagraph({ Title = "Coder", Content = "me + my friend" })
-TabCredits:CreateParagraph({ Title = "Safety", Content = "Artful is gay irl" })
-TabCredits:CreateParagraph({ Title = "Key", Content = "release" })
-TabCredits:CreateParagraph({ Title = "Version", Content = "Beta 1 — Slim" })
-
-TabCredits:CreateSection("Roadmap")
-TabCredits:CreateParagraph({ Title = "HunterFarm", Content = "Coming soon" })
-TabCredits:CreateParagraph({ Title = "HunterSkate", Content = "Possibly soon" })
-TabCredits:CreateParagraph({ Title = "HunterKiller", Content = "Coming soon" })
-
-notify("Huntsaken", "Loaded — KEY was release")
+_G._HunterAimLoaded = true
+print("[HunterAim v10] Loaded — Shed Slash / Chance Shoot / Two Time Stab. Sound read: Sounds/Sound/SFX/Sfx/SoundEffects/SoundIds.")
